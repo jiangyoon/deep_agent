@@ -1,0 +1,21 @@
+# Python 缓存与本地工具文件
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# 虚拟环境与编辑器本地状态
+.venv/
+venv/
+.vscode/
+
+# 环境变量与运行时数据（可能含密钥、记忆、对话原文）
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.db-*
+
+# 后续 Web 层生成的运行日志
+*.log
