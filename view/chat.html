@@ -25,10 +25,11 @@
 <body class="bg-gray-50 text-gray-900 font-sans">
   <div id="app"></div>
 
-  <script src="shared.js"></script>
+  <!-- ?v= 用来打破浏览器对旧 shared.js 的缓存；改了图标就往上加一版 -->
+  <script src="/shared.js?v=2"></script>
   <script>
     // ------------------------------------------------------------
-    // 思考过程组件
+    // 执行过程组件
     // 用法：<execution-steps :steps="msg.steps" :is-generating="true" />
     // ------------------------------------------------------------
     const ExecutionSteps = {
@@ -52,7 +53,7 @@
           >
             <div class="flex items-center space-x-2 text-sm font-medium text-gray-700">
               <icon-brain class="w-4 h-4 text-violet-600" />
-              <span>Agent 思考过程</span>
+              <span>Agent 执行过程</span>
               <icon-loader v-if="isGenerating" class="w-3.5 h-3.5 animate-spin ml-2 text-gray-400" />
             </div>
             <icon-chevron-down v-if="isExpanded" class="w-4 h-4 text-gray-400" />
@@ -85,7 +86,7 @@
                 </span>
                 <p
                   v-if="step.detail"
-                  class="text-gray-500 text-xs mt-1 font-mono bg-white border border-gray-100 p-2 rounded-lg shadow-sm"
+                  class="text-gray-500 text-xs mt-1 font-mono whitespace-pre-wrap bg-white border border-gray-100 p-2 rounded-lg shadow-sm"
                 >
                   {{ step.detail }}
                 </p>
@@ -110,29 +111,96 @@
         IconUser,
         IconSend,
         IconSquare,
+        IconTrash,
       },
       setup() {
-        const messages = ref([]);       // 空列表，等真实接口填充
-        const sessions = ref([]);       // 空列表，等真实会话列表
+        const messages = ref([]);
+        const sessions = ref([]);
+        const currentSessionId = ref(null);
+        const contextUsage = ref({
+          used_tokens: 0,
+          limit_tokens: 16384,
+          percent: 0,
+        });
+        const sessionError = ref('');
         const inputValue = ref('');
         const isGenerating = ref(false);
         const textareaRef = ref(null);
         const messagesEndRef = ref(null);
+        // 真正滚动的是这个 overflow 容器，不是整页 window
+        const messagesScrollRef = ref(null);
 
         const lastMessageId = computed(function () {
           const list = messages.value;
           return list.length ? list[list.length - 1].id : null;
         });
 
-        function scrollToBottom() {
+        const contextPercent = computed(function () {
+          const percent = Number(contextUsage.value.percent || 0);
+          return Math.max(0, Math.min(percent, 100));
+        });
+
+        const contextRingStyle = computed(function () {
+          const percent = contextPercent.value;
+          const color = percent >= 85
+            ? '#e11d48'
+            : percent >= 65
+              ? '#d97706'
+              : '#7c3aed';
+          return {
+            background: 'conic-gradient('
+              + color
+              + ' '
+              + percent
+              + '%, #e5e7eb '
+              + percent
+              + '% 100%)',
+          };
+        });
+
+        function compactTokens(value) {
+          const tokens = Number(value || 0);
+          if (tokens >= 1000) {
+            return (tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1) + 'K';
+          }
+          return String(tokens);
+        }
+
+        function resetContextUsage() {
+          contextUsage.value = {
+            used_tokens: 0,
+            limit_tokens: 16384,
+            percent: 0,
+          };
+        }
+
+        // instant=true：打开会话时立刻跳到底；false：流式追加时平滑滚
+        function scrollToBottom(instant) {
           nextTick(function () {
-            if (messagesEndRef.value) {
-              messagesEndRef.value.scrollIntoView({ behavior: 'smooth' });
+            const container = messagesScrollRef.value;
+            if (!container) return;
+            function jump() {
+              container.scrollTop = container.scrollHeight;
             }
+            // 再等两帧，确保消息 DOM 已画完，scrollHeight 才是最终高度
+            requestAnimationFrame(function () {
+              requestAnimationFrame(function () {
+                if (instant) {
+                  jump();
+                } else {
+                  container.scrollTo({
+                    top: container.scrollHeight,
+                    behavior: 'smooth',
+                  });
+                }
+              });
+            });
           });
         }
 
-        watch(messages, scrollToBottom, { deep: true });
+        watch(messages, function () {
+          scrollToBottom(false);
+        }, { deep: true });
 
         function handleInput() {
           nextTick(function () {
@@ -159,46 +227,371 @@
           });
         }
 
-        // 只把用户消息放进列表；Agent 回复留给以后接真实后端
-        function handleSend() {
+        let activeRequest = null;
+
+        async function responseJson(response) {
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.detail || '请求失败');
+          }
+          return data;
+        }
+
+        async function loadSessions() {
+          try {
+            const response = await fetch('/api/sessions');
+            sessions.value = await responseJson(response);
+            sessionError.value = '';
+          } catch (error) {
+            sessionError.value = '会话列表加载失败：' + error.message;
+          }
+        }
+
+        async function newSession() {
+          if (activeRequest) {
+            activeRequest.abort();
+          }
+
+          try {
+            const response = await fetch('/api/sessions', {
+              method: 'POST',
+            });
+            const session = await responseJson(response);
+            currentSessionId.value = session.id;
+            messages.value = [];
+            resetContextUsage();
+            isGenerating.value = false;
+            sessionError.value = '';
+            return session.id;
+          } catch (error) {
+            sessionError.value = '新建会话失败：' + error.message;
+            return null;
+          }
+        }
+
+        async function openSession(sessionId) {
+          if (activeRequest) {
+            activeRequest.abort();
+          }
+
+          try {
+            const response = await fetch(
+              '/api/sessions/' + encodeURIComponent(sessionId)
+            );
+            const session = await responseJson(response);
+            const baseId = Date.now();
+            messages.value = session.messages.map(function (message, index) {
+              return {
+                id: baseId + index,
+                role: message.role,
+                content: message.content,
+                steps: [],
+              };
+            });
+            currentSessionId.value = session.id;
+            contextUsage.value = session.context_usage || {
+              used_tokens: 0,
+              limit_tokens: 16384,
+              percent: 0,
+            };
+            isGenerating.value = false;
+            sessionError.value = '';
+            // 进入已有会话：立刻滚到最新消息，不要停在顶部
+            scrollToBottom(true);
+          } catch (error) {
+            sessionError.value = '会话加载失败：' + error.message;
+          }
+        }
+
+        async function removeSession(sessionId) {
+          const confirmed = window.confirm('确认删除这个会话？');
+          if (!confirmed) return;
+
+          try {
+            const response = await fetch(
+              '/api/sessions/' + encodeURIComponent(sessionId),
+              { method: 'DELETE' }
+            );
+            if (!response.ok) {
+              const data = await response.json();
+              throw new Error(data.detail || '删除失败');
+            }
+
+            if (currentSessionId.value === sessionId) {
+              currentSessionId.value = null;
+              messages.value = [];
+              resetContextUsage();
+            }
+            await loadSessions();
+          } catch (error) {
+            sessionError.value = '会话删除失败：' + error.message;
+          }
+        }
+
+        function parseSseBlock(block) {
+          let eventName = 'message';
+          const dataLines = [];
+
+          block.split('\n').forEach(function (line) {
+            if (line.startsWith('event:')) {
+              eventName = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              dataLines.push(line.slice(5).trimStart());
+            }
+          });
+
+          if (!dataLines.length) return null;
+          return {
+            name: eventName,
+            data: JSON.parse(dataLines.join('\n')),
+          };
+        }
+
+        // 发送问题：先把用户消息和空的 Agent 气泡放进列表，
+        // 再请求 /api/chat/stream，按 SSE 事件把回答一点点拼上去。
+        async function handleSend() {
           const text = inputValue.value.trim();
+          // 空内容，或上一轮还在生成时，直接忽略
           if (!text || isGenerating.value) return;
 
+          let sessionId = currentSessionId.value;
+          if (!sessionId) {
+            sessionId = await newSession();
+            if (!sessionId) return;
+          }
+
+          // 用时间戳生成一对关联 id：用户消息 + 对应的 Agent 空气泡
+          const requestId = Date.now();
           messages.value = messages.value.concat([
-            { id: Date.now(), role: 'user', content: text },
+            { id: requestId, role: 'user', content: text },
+            {
+              id: requestId + 1,
+              role: 'agent',
+              content: '',
+              steps: [],
+            },
           ]);
           inputValue.value = '';
+          isGenerating.value = true;
+          // 发送后把输入框高度收回去
           if (textareaRef.value) {
             textareaRef.value.style.height = 'auto';
           }
 
-          // TODO: 在这里调用真实 Agent 接口，把返回写入 messages
+          // AbortController 给"停止生成"用：点停止就 abort 这次 fetch
+          activeRequest = new AbortController();
+
+          try {
+            // 会话编号放进 URL；后端会把本轮消息写入对应检查点
+            const response = await fetch(
+              '/api/sessions/'
+                + encodeURIComponent(sessionId)
+                + '/stream',
+              {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ question: text }),
+              signal: activeRequest.signal,
+              }
+            );
+
+            // HTTP 层失败（4xx/5xx）：尽量读出 FastAPI 返回的 detail
+            if (!response.ok) {
+              const data = await response.json();
+              throw new Error(data.detail || '请求失败');
+            }
+
+            // 找到刚才预置的那条空 Agent 消息，后面往它的 content 上追加
+            const agentMessage = messages.value.find(function (msg) {
+              return msg.id === requestId + 1;
+            });
+            if (!response.body) {
+              throw new Error('浏览器无法读取流式响应');
+            }
+
+            // ReadableStream：一块一块读字节；decoder 转成字符串
+            // buffer 用来拼不完整的 SSE 事件（可能被拆在两次 read 之间）
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let buffer = '';
+            let streamFinished = false;
+
+            while (!streamFinished) {
+              const result = await reader.read();
+              // stream: true 表示后面可能还有字节，避免把多字节汉字截断
+              buffer += decoder.decode(result.value || new Uint8Array(), {
+                stream: !result.done,
+              });
+
+              // SSE 协议：每个事件以空行（\n\n）分隔
+              let separatorIndex = buffer.indexOf('\n\n');
+              while (separatorIndex !== -1) {
+                const block = buffer.slice(0, separatorIndex);
+                buffer = buffer.slice(separatorIndex + 2);
+                const event = parseSseBlock(block);
+
+                // reasoning_delta：持续追加到同一个"模型思考"步骤
+                if (event && event.name === 'reasoning_delta' && agentMessage) {
+                  let reasoningStep = agentMessage.steps.find(function (step) {
+                    return step.kind === 'reasoning';
+                  });
+                  if (!reasoningStep) {
+                    reasoningStep = {
+                      kind: 'reasoning',
+                      action: '模型思考',
+                      detail: '',
+                      status: 'running',
+                    };
+                    agentMessage.steps.push(reasoningStep);
+                  }
+                  reasoningStep.detail += event.data.text || '';
+                // tool_call：新增一条正在执行的工具步骤
+                } else if (event && event.name === 'tool_call' && agentMessage) {
+                  const argsText = event.data.args
+                    ? JSON.stringify(event.data.args, null, 2)
+                    : '';
+                  agentMessage.steps.push({
+                    kind: 'tool',
+                    toolCallId: event.data.id || '',
+                    action: '调用工具 ' + (event.data.name || '未知工具'),
+                    detail: argsText,
+                    status: 'running',
+                  });
+                // tool_result：找到对应工具步骤，补上结果并标记完成
+                } else if (event && event.name === 'tool_result' && agentMessage) {
+                  let toolStep = agentMessage.steps.find(function (step) {
+                    return step.kind === 'tool'
+                      && step.toolCallId === (event.data.id || '');
+                  });
+                  if (!toolStep) {
+                    toolStep = {
+                      kind: 'tool',
+                      toolCallId: event.data.id || '',
+                      action: '工具 ' + (event.data.name || '未知工具'),
+                      detail: '',
+                      status: 'running',
+                    };
+                    agentMessage.steps.push(toolStep);
+                  }
+                  const resultText = '返回：' + (event.data.result || '');
+                  toolStep.detail = toolStep.detail
+                    ? toolStep.detail + '\n' + resultText
+                    : resultText;
+                  toolStep.status = 'completed';
+                // usage：只更新当前会话的上下文仪表，不加入问答执行步骤
+                } else if (event && event.name === 'usage' && agentMessage) {
+                  const inputTokens = Number(event.data.input_tokens || 0);
+                  const outputTokens = Number(event.data.output_tokens || 0);
+                  const limitTokens = Number(
+                    event.data.limit_tokens
+                      || contextUsage.value.limit_tokens
+                      || 16384
+                  );
+                  const usedTokens = inputTokens + outputTokens;
+                  contextUsage.value = {
+                    used_tokens: usedTokens,
+                    limit_tokens: limitTokens,
+                    percent: event.data.context_percent !== undefined
+                      ? Number(event.data.context_percent)
+                      : usedTokens * 100 / limitTokens,
+                  };
+                // answer_delta：正文增量，拼到 Agent 气泡里
+                } else if (event && event.name === 'answer_delta' && agentMessage) {
+                  agentMessage.steps.forEach(function (step) {
+                    if (step.status === 'running' && step.kind === 'reasoning') {
+                      step.status = 'completed';
+                    }
+                  });
+                  agentMessage.content += event.data.text || '';
+                // error：服务端在流里报错
+                } else if (event && event.name === 'error') {
+                  if (agentMessage) {
+                    agentMessage.steps.forEach(function (step) {
+                      if (step.status === 'running') {
+                        step.status = 'error';
+                      }
+                    });
+                  }
+                  throw new Error(event.data.message || '流式请求失败');
+                // done：正常结束
+                } else if (event && event.name === 'done') {
+                  if (agentMessage) {
+                    agentMessage.steps.forEach(function (step) {
+                      if (step.status === 'running') {
+                        step.status = 'completed';
+                      }
+                    });
+                  }
+                  streamFinished = true;
+                  break;
+                }
+
+                separatorIndex = buffer.indexOf('\n\n');
+              }
+
+              // 底层流已关闭（即使没收到 done 也要退出循环）
+              if (result.done) {
+                streamFinished = true;
+              }
+            }
+          } catch (error) {
+            // 失败或用户点了停止：在 Agent 气泡里补一句说明
+            const agentMessage = messages.value.find(function (msg) {
+              return msg.id === requestId + 1;
+            });
+            if (agentMessage) {
+              agentMessage.steps.forEach(function (step) {
+                if (step.status === 'running') {
+                  step.status = 'error';
+                }
+              });
+              const message = error.name === 'AbortError'
+                ? '已停止生成。'
+                : '请求失败：' + error.message;
+              agentMessage.content = agentMessage.content
+                ? agentMessage.content + '\n\n' + message
+                : message;
+            }
+          } finally {
+            // 无论成功失败，都清掉控制器并恢复发送按钮
+            activeRequest = null;
+            isGenerating.value = false;
+            await loadSessions();
+          }
         }
 
         function stopGeneration() {
+          if (activeRequest) {
+            activeRequest.abort();
+          }
           isGenerating.value = false;
-          // TODO: 在这里取消真实流式请求
         }
 
-        function newSession() {
-          messages.value = [];
-          isGenerating.value = false;
-        }
+        onMounted(loadSessions);
 
         return {
           messages,
           sessions,
+          currentSessionId,
+          contextUsage,
+          contextPercent,
+          contextRingStyle,
+          sessionError,
           inputValue,
           isGenerating,
           textareaRef,
           messagesEndRef,
+          messagesScrollRef,
           lastMessageId,
           handleInput,
           handleKeyDown,
           handleSend,
           stopGeneration,
           newSession,
+          openSession,
+          removeSession,
           contentBlocks,
+          compactTokens,
         };
       },
       template: `
@@ -217,15 +610,35 @@
 
             <div class="flex-1 overflow-y-auto px-3 py-2 space-y-1">
               <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3 px-3 mt-2">历史会话</h3>
+              <p v-if="sessionError" class="px-3 mb-3 text-xs leading-relaxed text-rose-600">{{ sessionError }}</p>
               <p v-if="!sessions.length" class="px-3 text-sm text-gray-400">暂无会话</p>
-              <button
+              <div
                 v-for="chat in sessions"
                 :key="chat.id"
-                class="w-full text-left flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-violet-50 text-sm transition-colors group text-gray-600"
+                class="flex items-center rounded-xl transition-colors group"
+                :class="currentSessionId === chat.id
+                  ? 'bg-violet-50 text-violet-900'
+                  : 'hover:bg-violet-50 text-gray-600'"
               >
-                <icon-message class="w-4 h-4 text-gray-400 group-hover:text-violet-600 transition-colors" />
-                <span class="truncate group-hover:text-violet-900 font-medium transition-colors">{{ chat.title }}</span>
-              </button>
+                <button
+                  @click="openSession(chat.id)"
+                  class="min-w-0 flex-1 text-left flex items-center gap-3 px-3 py-3 text-sm"
+                >
+                  <icon-message class="w-4 h-4 flex-shrink-0 text-gray-400 group-hover:text-violet-600 transition-colors" />
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate font-medium">{{ chat.title }}</span>
+                    <span class="block mt-0.5 text-[11px] text-gray-400">{{ chat.message_count }} 条消息</span>
+                  </span>
+                </button>
+                <button
+                  @click.stop="removeSession(chat.id)"
+                  class="mr-2 p-2 rounded-lg text-gray-300 hover:text-rose-600 hover:bg-rose-50 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-all"
+                  title="删除会话"
+                  aria-label="删除会话"
+                >
+                  <icon-trash class="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             <div class="p-4 border-t border-gray-100 space-y-1">
@@ -254,12 +667,13 @@
                 <span class="font-semibold text-gray-800 text-sm tracking-wide">Agent 工作台</span>
               </div>
               <div class="text-xs text-violet-700 bg-violet-50 border border-violet-100 px-3 py-1.5 rounded-full font-medium shadow-sm">
-                模型: Agent-Pro-V1
+                单用户会话模式
               </div>
             </header>
 
-            <div class="flex-1 overflow-y-auto p-4 sm:p-8 pb-40">
-              <div class="max-w-4xl mx-auto space-y-8">
+            <!-- 消息区：flex-1 占满中间剩余高度；底部输入框不再 absolute 叠上来 -->
+            <div ref="messagesScrollRef" class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-8">
+              <div class="max-w-4xl mx-auto space-y-8 pb-4">
                 <div v-if="!messages.length" class="text-center text-gray-400 text-sm pt-24">
                   输入问题开始对话
                 </div>
@@ -328,7 +742,8 @@
               </div>
             </div>
 
-            <div class="absolute bottom-0 w-full bg-gradient-to-t from-gray-50 via-gray-50 to-transparent pt-12 pb-6 px-4">
+            <!-- 输入区：占文档流底部，高度随内容变，消息区不会被挡住 -->
+            <div class="flex-shrink-0 w-full border-t border-gray-200 bg-gray-50 px-4 pt-4 pb-6">
               <div class="max-w-4xl mx-auto relative flex flex-col items-center">
                 <button
                   v-if="isGenerating"
@@ -339,7 +754,29 @@
                   停止生成
                 </button>
 
-                <div class="w-full relative flex items-end bg-white border border-gray-300 rounded-[1.5rem] shadow-lg focus-within:ring-4 focus-within:ring-violet-500/20 focus-within:border-violet-500 transition-all duration-300 overflow-hidden">
+                <div class="w-full flex items-end gap-3">
+                  <div
+                    class="group relative flex-shrink-0 mb-1"
+                    title="当前会话占模型上下文窗口的比例"
+                  >
+                    <div
+                      class="w-14 h-14 rounded-full p-[5px] shadow-sm transition-all duration-500"
+                      :style="contextRingStyle"
+                    >
+                      <div class="w-full h-full rounded-full bg-gray-50 flex flex-col items-center justify-center leading-none">
+                        <span class="text-[11px] font-semibold text-gray-700">
+                          {{ contextPercent.toFixed(0) }}%
+                        </span>
+                        <span class="text-[8px] mt-1 text-gray-400">上下文</span>
+                      </div>
+                    </div>
+                    <div class="absolute bottom-full left-0 mb-2 hidden group-hover:block z-20 whitespace-nowrap rounded-lg bg-gray-900 px-3 py-2 text-[11px] text-white shadow-lg">
+                      {{ compactTokens(contextUsage.used_tokens) }} /
+                      {{ compactTokens(contextUsage.limit_tokens) }} token
+                    </div>
+                  </div>
+
+                  <div class="flex-1 relative flex items-end bg-white border border-gray-300 rounded-[1.5rem] shadow-lg focus-within:ring-4 focus-within:ring-violet-500/20 focus-within:border-violet-500 transition-all duration-300 overflow-hidden">
                   <textarea
                     ref="textareaRef"
                     v-model="inputValue"
@@ -360,6 +797,7 @@
                     >
                       <icon-send class="w-5 h-5" />
                     </button>
+                  </div>
                   </div>
                 </div>
                 <div class="text-xs text-gray-400 mt-3 flex items-center gap-1.5">

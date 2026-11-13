@@ -1,7 +1,7 @@
 // view/shared.js
 // 登录页、对话页共用的图标组件。两页暂时各自独立，无互相跳转。
 
-const { createApp, ref, computed, watch, nextTick } = Vue;
+const { createApp, ref, computed, watch, nextTick, onMounted } = Vue;
 
 // ------------------------------------------------------------
 // 图标：不要声明名为 class 的 prop（保留字）。
@@ -54,3 +54,10 @@ const IconSend = makeIcon(`
   <path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>
 `);
 const IconSquare = makeIcon(`<rect width="18" height="18" x="3" y="3" rx="2"/>`);
+const IconTrash = makeIcon(`
+  <path d="M3 6h18"/>
+  <path d="M8 6V4h8v2"/>
+  <path d="M19 6l-1 14H6L5 6"/>
+  <path d="M10 11v5"/>
+  <path d="M14 11v5"/>
+`);
