@@ -53,7 +53,7 @@ def usage_data(usage) -> dict | None:
     return result
 
 
-def stream_answer(agent, question: str, run_config=None):
+def stream_answer(agent, question: str, run_config=None, context=None):
     """运行一次独立问答，发送思考、工具步骤、用量和回答正文。"""
     text_emitted = False
     usage_tracker = StreamUsageTracker()
@@ -64,6 +64,8 @@ def stream_answer(agent, question: str, run_config=None):
         }
         if run_config is not None:
             stream_arguments["config"] = run_config
+        if context is not None:
+            stream_arguments["context"] = context
 
         chunks = agent.stream(
             {"messages": [{"role": "user", "content": question}]},

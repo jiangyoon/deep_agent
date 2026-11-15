@@ -41,7 +41,8 @@ def check_settings():
 
     if config.MODEL_API_KEY == "":
         raise ValueError(
-            "未设置模型密钥。请在启动前设置环境变量 DEEP_AGENT_MODEL_API_KEY"
+            "未设置模型密钥。请设置环境变量 DEEP_AGENT_MODEL_API_KEY，"
+            "或写在项目根目录的 .env 中"
         )
 
 

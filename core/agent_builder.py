@@ -2,6 +2,7 @@
 # 作用：把"模型"、"系统提示词"、"工具"、"Skill"、"记忆"、"会话保存"组装成一个 Deep Agent。
 
 from deepagents import create_deep_agent
+from typing import TypedDict
 
 import config
 from my_tools import ALL_TOOLS
@@ -9,7 +10,12 @@ from core.backend_builder import SKILLS_ROUTE, build_backend, build_permissions
 from core.memory_store import MEMORY_FILE_PATH
 
 
-def build_agent(llm, tools=None, use_skills=None, use_memory=False, store=None, checkpointer=None):
+class AgentContext(TypedDict):
+    user_id: str
+
+
+def build_agent(llm, tools=None, use_skills=None, use_memory=False, store=None,
+                checkpointer=None, require_user=False):
     """创建 Agent。
 
     参数 llm       ：模型连接对象，由 core/llm_model.py 的 create_llm() 生成。
@@ -21,6 +27,7 @@ def build_agent(llm, tools=None, use_skills=None, use_memory=False, store=None, 
                      启用记忆时必须传。
     参数 checkpointer：会话保存器，由 core/session_store.py 的 open_checkpointer() 打开。
                      不传就不保存会话，每次提问都是独立的，和阶段 2 到 5 一样。
+    参数 require_user：Web 必须启用，记忆读写要求服务器传入用户上下文。
     """
     if tools is None:
         tools = ALL_TOOLS
@@ -40,7 +47,8 @@ def build_agent(llm, tools=None, use_skills=None, use_memory=False, store=None, 
     memory = None
 
     if use_skills or use_memory:
-        backend = build_backend(use_skills=use_skills, use_memory=use_memory)
+        backend = build_backend(use_skills=use_skills, use_memory=use_memory,
+                                require_user=require_user)
 
     if use_skills:
         skills = [SKILLS_ROUTE]
@@ -60,5 +68,6 @@ def build_agent(llm, tools=None, use_skills=None, use_memory=False, store=None, 
         memory=memory,
         store=store,
         checkpointer=checkpointer,
+        context_schema=AgentContext if require_user else None,
     )
     return agent

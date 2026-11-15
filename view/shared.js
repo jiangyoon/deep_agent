@@ -1,7 +1,27 @@
 // view/shared.js
-// 登录页、对话页共用的图标组件。两页暂时各自独立，无互相跳转。
+// 登录页、对话页共用的认证请求与图标组件。
 
 const { createApp, ref, computed, watch, nextTick, onMounted } = Vue;
+
+let authenticationLost = false;
+
+function redirectToLogin(expired) {
+  if (authenticationLost) return;
+  authenticationLost = true;
+  window.location.replace(expired ? '/login?expired=1' : '/login');
+}
+
+async function apiFetch(url, options) {
+  if (authenticationLost) {
+    throw new Error('登录已过期，请重新登录');
+  }
+  const response = await fetch(url, { credentials: 'same-origin', ...options });
+  if (response.status === 401) {
+    redirectToLogin(true);
+    throw new Error('登录已过期，请重新登录');
+  }
+  return response;
+}
 
 // ------------------------------------------------------------
 // 图标：不要声明名为 class 的 prop（保留字）。

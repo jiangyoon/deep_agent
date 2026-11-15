@@ -7,6 +7,7 @@
 #   其他路径   -> 仍然在内存里，和之前一样
 
 import os
+from functools import partial
 
 from deepagents.backends import (
     CompositeBackend,
@@ -17,7 +18,7 @@ from deepagents.backends import (
 from deepagents.middleware.filesystem import FilesystemPermission
 
 import config
-from core.memory_store import MEMORY_NAMESPACE, MEMORY_ROUTE
+from core.memory_store import MEMORY_ROUTE, get_memory_namespace
 
 # Agent 眼里的 Skill 路径。注意结尾的斜杠
 SKILLS_ROUTE = "/skills/"
@@ -34,16 +35,19 @@ def get_skills_folder():
     return os.path.join(project_folder, config.SKILLS_DIR)
 
 
-def memory_namespace(runtime):
+def memory_namespace(runtime, require_user=False):
     """告诉 StoreBackend：记忆存在数据库的哪个分组里。
 
-    框架每次读写记忆时都会调用这个函数。参数 runtime 是框架传进来的运行信息，
-    单用户阶段用不上，固定返回同一个分组；以后多用户时，要在这里按用户区分分组。
+    Web 身份只由后端放入 runtime.context；缺失时禁止回退到终端共享分组。
     """
-    return MEMORY_NAMESPACE
+    context = getattr(runtime, "context", None)
+    user_id = context.get("user_id") if isinstance(context, dict) else None
+    if require_user and not user_id:
+        raise ValueError("Web 记忆访问缺少用户身份")
+    return get_memory_namespace(user_id)
 
 
-def build_backend(use_skills=True, use_memory=False):
+def build_backend(use_skills=True, use_memory=False, require_user=False):
     """创建组合文件系统。
 
     参数 use_skills：是否把 /skills/ 指向 skills 文件夹
@@ -64,7 +68,9 @@ def build_backend(use_skills=True, use_memory=False):
 
     if use_memory:
         # 这里没有直接传数据库，StoreBackend 会使用创建 Agent 时传入的 store
-        routes[MEMORY_ROUTE] = StoreBackend(namespace=memory_namespace)
+        routes[MEMORY_ROUTE] = StoreBackend(
+            namespace=partial(memory_namespace, require_user=require_user)
+        )
 
     backend = CompositeBackend(default=StateBackend(), routes=routes)
     return backend

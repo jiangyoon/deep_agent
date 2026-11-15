@@ -1,31 +1,31 @@
-"""FastAPI 应用：阶段 7A-5.1 的单用户持久化会话 Web 接口。"""
+"""FastAPI 应用：阶段 7B-1 的身份验证与用户隔离接口。"""
 
 import logging
 import threading
-import uuid
 from contextlib import asynccontextmanager
-from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import config
 from core.agent_builder import build_agent
 from core.llm_model import create_llm
-from core.memory_store import open_store, seed_memory_if_missing
+from core.memory_store import (
+    MEMORY_TEMPLATE, memory_snapshot, open_store, seed_memory_if_missing, write_memory,
+)
 from core.session_store import (
     delete_session,
     get_session_messages,
-    list_sessions,
     make_config,
-    new_session_id,
     open_checkpointer,
     session_exists,
 )
 from display.printer import content_to_text
 from web.agent_stream import stream_answer
+from core.user_store import UserStore
+from web.auth import current_user, require_same_origin, router as auth_router
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -39,9 +39,9 @@ session_agent_lock = threading.Lock()
 async def lifespan(application: FastAPI):
     """Web 服务运行期间持续保持记忆库和会话库连接。"""
     with open_store() as store, open_checkpointer() as saver:
-        if config.USE_MEMORY:
-            seed_memory_if_missing(store)
-
+        application.state.user_store = UserStore()
+        # 当前 SQLite 同步执行链串行运行，避免生成与删除同一会话相互覆盖。
+        application.state.session_run_lock = threading.Lock()
         application.state.memory_store = store
         application.state.session_saver = saver
         application.state.session_agent = None
@@ -50,21 +50,26 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(
     title="Deep Agent",
-    version="7A-5.1",
+    version="7B-2",
+    dependencies=[Depends(require_same_origin)],
     lifespan=lifespan,
 )
+
+app.include_router(auth_router)
+
+
+@app.middleware("http")
+async def private_api_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 class ChatRequest(BaseModel):
     """单轮问答请求。"""
 
     question: str = Field(min_length=1, max_length=10000)
-
-
-class ChatResponse(BaseModel):
-    """单轮问答响应。"""
-
-    answer: str
 
 
 class SessionResponse(BaseModel):
@@ -75,11 +80,12 @@ class SessionResponse(BaseModel):
     message_count: int
 
 
-@lru_cache(maxsize=1)
-def get_agent():
-    """首次提问时创建 Agent，后续请求复用同一个无会话 Agent。"""
-    llm = create_llm()
-    return build_agent(llm)
+class MemoryRevision(BaseModel):
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class MemoryUpdate(MemoryRevision):
+    content: str = Field(max_length=100000)
 
 
 def get_session_agent(request: Request):
@@ -98,6 +104,7 @@ def get_session_agent(request: Request):
                 use_memory=config.USE_MEMORY,
                 store=request.app.state.memory_store,
                 checkpointer=request.app.state.session_saver,
+                require_user=True,
             )
             request.app.state.session_agent = agent
     return agent
@@ -184,14 +191,19 @@ def view_file(name: str) -> FileResponse:
 
 
 @app.get("/", include_in_schema=False)
-def chat_page() -> FileResponse:
-    """返回单用户聊天页面。"""
+def chat_page(request: Request) -> Response:
+    """未登录时跳转；聊天 API 仍独立验证身份。"""
+    token = request.cookies.get(config.AUTH_COOKIE_NAME, "")
+    if not token or request.app.state.user_store.resolve_login(token) is None:
+        return RedirectResponse("/login", status_code=303)
     return view_file("chat.html")
 
 
 @app.get("/login", include_in_schema=False)
-def login_page() -> FileResponse:
-    """预留登录页；认证会在阶段 7B 接入。"""
+def login_page(request: Request) -> Response:
+    token = request.cookies.get(config.AUTH_COOKIE_NAME, "")
+    if token and request.app.state.user_store.resolve_login(token) is not None:
+        return RedirectResponse("/", status_code=303)
     return view_file("login.html")
 
 
@@ -204,110 +216,92 @@ def shared_script() -> FileResponse:
 @app.get("/health")
 def health() -> dict[str, str]:
     """供浏览器和部署探针确认 Web 服务已启动。"""
-    return {"status": "ok", "stage": "7A-5.1"}
+    return {"status": "ok", "stage": "7B-2"}
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-def chat(request: ChatRequest) -> ChatResponse:
-    """执行一次独立问答；本阶段暂不保存会话历史。"""
-    question = request.question.strip()
-    if question == "":
-        raise HTTPException(status_code=422, detail="问题不能为空")
+def require_owned_chat(request: Request, user: dict, session_id: str):
+    """归属查询包含 user_id；不向其他用户泄露会话是否存在。"""
+    if not request.app.state.user_store.owns_chat(user["id"], session_id):
+        raise HTTPException(status_code=404, detail="没有这个会话")
 
+
+def owned_session_user(request: Request, session_id: str,
+                       user: dict = Depends(current_user)) -> dict:
+    require_owned_chat(request, user, session_id)
+    return user
+
+
+def session_operation(request: Request):
+    """锁的生存期覆盖整个响应；不阻塞等待，避免占满流式线程池。"""
+    lock = request.app.state.session_run_lock
+    if not lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="对话生成或数据更新正在进行，请稍后重试")
     try:
-        result = get_agent().invoke(
-            {"messages": [{"role": "user", "content": question}]}
-        )
-        messages = result.get("messages", [])
-        if not messages:
-            raise RuntimeError("Agent 没有返回消息")
-
-        answer = content_to_text(messages[-1].content).strip()
-        if answer == "":
-            raise RuntimeError("Agent 返回了空回答")
-        return ChatResponse(answer=answer)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception("Web 单轮问答失败")
-        raise HTTPException(
-            status_code=503,
-            detail="模型调用失败，请检查服务端日志和模型配置",
-        ) from None
+        yield
+    finally:
+        lock.release()
 
 
-@app.post("/api/chat/stream")
-def chat_stream(request: ChatRequest) -> StreamingResponse:
-    """以 SSE 事件流返回一次独立问答的回答正文。"""
-    question = request.question.strip()
-    if question == "":
-        raise HTTPException(status_code=422, detail="问题不能为空")
+@app.get("/api/memory")
+def get_memory(request: Request, user: dict = Depends(current_user)) -> dict:
+    return memory_snapshot(request.app.state.memory_store, user["id"])
 
-    try:
-        agent = get_agent()
-    except Exception:
-        logger.exception("创建 Web Agent 失败")
-        raise HTTPException(
-            status_code=503,
-            detail="模型初始化失败，请检查服务端日志和模型配置",
-        ) from None
 
-    return StreamingResponse(
-        stream_answer(agent, question),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+def check_memory_revision(request: Request, user: dict, revision: str):
+    current = memory_snapshot(request.app.state.memory_store, user["id"])
+    if revision != current["revision"]:
+        raise HTTPException(status_code=409, detail="记忆已被其他操作更新，请保留草稿并重新加载后再编辑")
+
+
+@app.put("/api/memory")
+def update_memory(body: MemoryUpdate, request: Request,
+                  user: dict = Depends(current_user),
+                  operation=Depends(session_operation, scope="request")) -> dict:
+    check_memory_revision(request, user, body.revision)
+    write_memory(request.app.state.memory_store, body.content, user["id"])
+    return memory_snapshot(request.app.state.memory_store, user["id"])
+
+
+@app.delete("/api/memory")
+def reset_memory(body: MemoryRevision, request: Request,
+                 user: dict = Depends(current_user),
+                 operation=Depends(session_operation, scope="request")) -> dict:
+    check_memory_revision(request, user, body.revision)
+    # 保留可编辑的空模板，后续 Agent 的 edit_file 仍能正常使用。
+    write_memory(request.app.state.memory_store, MEMORY_TEMPLATE, user["id"])
+    return memory_snapshot(request.app.state.memory_store, user["id"])
+
+
+def chat_messages(request: Request, session_id: str):
+    if not session_exists(request.app.state.session_saver, session_id):
+        return []
+    return get_session_messages(get_session_agent(request), session_id)
 
 
 @app.post("/api/sessions", response_model=SessionResponse)
-def create_session() -> SessionResponse:
-    """生成一个新的 Web 会话编号；首次提问后才会写入检查点。"""
-    session_id = new_session_id() + "-" + uuid.uuid4().hex[:6]
-    return SessionResponse(
-        id=session_id,
-        title="新会话",
-        message_count=0,
-    )
+def create_session(request: Request, user: dict = Depends(current_user)) -> SessionResponse:
+    """创建会话时立即记录归属；尚未提问的空会话也会出现在列表中。"""
+    session_id = request.app.state.user_store.create_chat(user["id"])
+    return SessionResponse(id=session_id, title="新会话", message_count=0)
 
 
 @app.get("/api/sessions", response_model=list[SessionResponse])
-def get_sessions(request: Request) -> list[SessionResponse]:
-    """列出当前单用户数据库中的全部持久化会话。"""
-    saver = request.app.state.session_saver
-    session_ids = list_sessions(saver)
-    if not session_ids:
-        return []
-
-    agent = get_session_agent(request)
+def get_sessions(request: Request, user: dict = Depends(current_user)) -> list[SessionResponse]:
     result = []
-    for session_id in session_ids:
-        try:
-            messages = get_session_messages(agent, session_id)
-            visible_messages = browser_messages(messages)
-            result.append(
-                SessionResponse(
-                    id=session_id,
-                    title=session_title(messages, session_id),
-                    message_count=len(visible_messages),
-                )
-            )
-        except Exception:
-            logger.exception("读取会话失败：%s", session_id)
+    for session_id in request.app.state.user_store.list_chats(user["id"]):
+        messages = chat_messages(request, session_id)
+        result.append(SessionResponse(
+            id=session_id,
+            title=session_title(messages, session_id) if messages else "新会话",
+            message_count=len(browser_messages(messages)),
+        ))
     return result
 
 
 @app.get("/api/sessions/{session_id}")
-def get_session(request: Request, session_id: str) -> dict:
-    """读取一个会话的可展示消息。"""
-    saver = request.app.state.session_saver
-    if not session_exists(saver, session_id):
-        raise HTTPException(status_code=404, detail="没有这个会话")
-
-    agent = get_session_agent(request)
-    messages = get_session_messages(agent, session_id)
+def get_session(request: Request, session_id: str, user: dict = Depends(current_user)) -> dict:
+    require_owned_chat(request, user, session_id)
+    messages = chat_messages(request, session_id)
     return {
         "id": session_id,
         "messages": browser_messages(messages),
@@ -316,12 +310,13 @@ def get_session(request: Request, session_id: str) -> dict:
 
 
 @app.delete("/api/sessions/{session_id}", status_code=204)
-def remove_session(request: Request, session_id: str) -> None:
-    """删除一个会话的全部检查点。"""
-    saver = request.app.state.session_saver
-    if not session_exists(saver, session_id):
-        raise HTTPException(status_code=404, detail="没有这个会话")
-    delete_session(saver, session_id)
+def remove_session(request: Request, session_id: str,
+                   user: dict = Depends(owned_session_user),
+                   operation=Depends(session_operation, scope="request")) -> None:
+    require_owned_chat(request, user, session_id)
+    # 先清检查点，再清归属；中途失败时保留归属，允许用户重试删除。
+    delete_session(request.app.state.session_saver, session_id)
+    request.app.state.user_store.delete_chat(user["id"], session_id)
 
 
 @app.post("/api/sessions/{session_id}/stream")
@@ -329,30 +324,29 @@ def session_chat_stream(
     request: Request,
     session_id: str,
     chat_request: ChatRequest,
+    user: dict = Depends(owned_session_user),
+    operation=Depends(session_operation, scope="request"),
 ) -> StreamingResponse:
-    """在指定会话中提问，并将本轮状态写入检查点数据库。"""
+    # 获取运行锁后再次核对，防止依赖校验与加锁之间会话已被删除。
+    require_owned_chat(request, user, session_id)
     question = chat_request.question.strip()
     if question == "":
         raise HTTPException(status_code=422, detail="问题不能为空")
-
     try:
         agent = get_session_agent(request)
     except Exception:
         logger.exception("创建持久化 Web Agent 失败")
-        raise HTTPException(
-            status_code=503,
-            detail="模型初始化失败，请检查服务端日志和模型配置",
-        ) from None
+        raise HTTPException(status_code=503, detail="模型初始化失败，请检查服务端日志和模型配置") from None
+
+    def owned_stream():
+        if config.USE_MEMORY:
+            seed_memory_if_missing(request.app.state.memory_store, user_id=user["id"])
+        yield from stream_answer(
+            agent, question, run_config=make_config(session_id),
+            context={"user_id": user["id"]},
+        )
 
     return StreamingResponse(
-        stream_answer(
-            agent,
-            question,
-            run_config=make_config(session_id),
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        owned_stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )

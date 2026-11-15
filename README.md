@@ -1,7 +1,7 @@
 # deep_agent 学习工程
 
 用 Deep Agents 框架做一个 Web 问答 Agent 的学习工程，后端模型是自部署的 Qwen（vLLM，OpenAI 兼容接口）。
-目前完成阶段 2（基础问答、流式输出、思考模式）、阶段 3（自定义工具）、阶段 4（预置只读 Skill）、阶段 5（记忆）和阶段 6（会话持久化），记忆和会话都存于本地 SQLite。
+目前完成阶段 2–6、7A 单用户 Web，以及 7B 登录与多用户隔离（后端和页面）。最新进度见 `PROJECT_STATUS.md`。
 
 ## 一、第一次使用
 
@@ -17,10 +17,10 @@
    - `MODEL_BASE_URL`：模型服务地址，结尾带 `/v1`
    - `MODEL_NAME`：模型 id，用 `curl.exe 地址/models` 可以查到
 
-   再设置模型密钥环境变量（PowerShell 当前窗口示例）：
+   再在项目根目录新建 `.env`，写入模型密钥：
 
-   ```powershell
-   $env:DEEP_AGENT_MODEL_API_KEY = "你的密钥"
+   ```
+   DEEP_AGENT_MODEL_API_KEY=你的密钥
    ```
 
    这两项没改、或没有设置密钥时，程序启动会直接提示，不会去连一个不存在的地址。
@@ -39,6 +39,8 @@
 | `manage_memory.py` | 记忆管理：`show` 查看、`clear` 清空、`replace 文件路径` 整体替换 |
 | `stage6_chat.py` | 阶段 6：交互式多轮对话，会话保存后可接着聊（/new /list /switch /quit） |
 | `manage_sessions.py` | 会话管理：`list` 列出、`show 编号` 查看、`delete 编号` 删除 |
+| `manage_users.py` | Web 用户管理：`create 用户名`，交互输入密码 |
+| `stage7_web.py` | 启动 Web 后端，默认地址 `http://127.0.0.1:8000` |
 
 ## 三、目录结构
 
@@ -114,9 +116,23 @@ deep_agent/
 - 每次运行开始时，记忆全文会放进系统提示；Agent 根据框架自带的规则，自己决定什么时候用 `edit_file` 更新它。
 - 第一次运行时会预置一个带标题的空模板，因为 `edit_file` 只能改已经存在的文件。
 - 记忆每次请求都会带上，`config.py` 里的 `MEMORY_WARN_CHARS` 是提醒整理的字数。
-- 手工查看或修改记忆用 `manage_memory.py`，不经过 Agent。
+- Web 用户可在聊天页点击“记忆管理”，查看、编辑、保存或清空自己的记忆，不经过模型。
+- `manage_memory.py` 继续管理终端学习入口的独立记忆分组，不管理 Web 用户记忆。
 - `stage5_memory.py` 里关掉了 Skill，避免 `career-kb-qa` 的"只依据知识库回答"规则干扰对记忆的观察。
 - 以后换成达梦等数据库，主要改 `core/memory_store.py` 里的 `open_store()`，但需要先有该数据库的 LangGraph Store 实现。
+
+### Web 记忆管理
+
+登录后点击侧栏“记忆管理”（手机端点击顶部“记忆”）。窗口展示当前用户的
+`/memories/AGENTS.md` 内容、字符数和更新时间，点击“编辑”可全文修改；“取消编辑”
+恢复打开时的内容，不写入数据库。“保存”写入后可重新加载验证，服务重启后仍保留。
+
+“清空记忆”需要确认，确认后恢复空模板，方便 Agent 继续更新记忆，不删除聊天历史。
+保存和清空会核对打开时的版本；其他窗口或 Agent 已更新内容时，旧版本返回冲突，
+草稿保留，请先复制需要的草稿，再确认重新加载。生成或其他写入操作进行中时，请稍后重试。
+
+手动修改后的内容会被新会话加载，已有会话可能仍保留检查点中的旧记忆。管理范围是
+当前用户的主记忆文件，不包含导入导出和历史版本。本轮练习只补齐记忆管理，其他增强功能暂不做。
 
 ## 七、会话怎么用
 
@@ -137,9 +153,42 @@ deep_agent/
 
 ## 九、后续阶段
 
-阶段 7：多用户隔离；阶段 8：Web 层（FastAPI + 流式，含登录）。
+7A 已完成 Web 聊天；7B-1 已完成后端登录和多用户隔离；7B-2 已接入登录页面、当前用户与退出、登录过期处理。下一阶段待确定。
+
+### 7B 使用方法
+
+在已有环境内执行：
+
+```bash
+conda activate deep_agent
+python manage_users.py create alice
+python stage7_web.py
+```
+
+脚本会隐藏输入两次密码。用户名支持 1–64 位字母、数字、下划线和连字符，区分大小写；密码长度为 8–128 位。脚本直接连接 `data/users.db` 创建账号，不提供公开注册接口。
+
+打开 `http://127.0.0.1:8000`，未登录会自动进入登录页面。用脚本创建的账号登录后进入聊天页，顶部显示用户名，点击“退出登录”返回登录页。登录过期后会提示重新登录，并停止后续匿名 API 请求。
+
+也可以打开 `http://127.0.0.1:8000/docs` 验证 API：调用 `POST /api/auth/login`，请求体为 `{"username":"alice","password":"你设置的密码"}`。浏览器保存 HttpOnly Cookie 后，可调用 `GET /api/auth/me`、会话接口和 `POST /api/auth/logout`。
+
+- 登录固定有效期 7 天，退出和重新登录会撤销当前旧凭证。
+- `users.db` 保存用户、登录凭证摘要和聊天会话归属；`sessions.db` 保存检查点；`memory.db` 按 Web 用户隔离长期记忆。
+- 新建空会话立即保存归属，也会出现在列表中。未登录返回 401；其他用户的会话或不存在的会话返回 404。
+- 早期 `/api/chat` 和 `/api/chat/stream` 已移除，统一使用有归属的会话接口。
+- 当前 SQLite 同步执行链同时只运行一条生成请求；生成期间其他生成或删除请求返回 409，稍后可重试。
+- 本地 HTTP 默认不设置 Secure Cookie；HTTPS 部署时在环境变量或 `.env` 中设置 `DEEP_AGENT_COOKIE_SECURE=true`。
+- 不迁移旧单用户数据；终端学习入口继续使用独立的本地记忆分组，不读取 Web 用户记忆。
+
+验证命令（临时数据库、假模型，不调用真实模型）：
+
+```bash
+python -m unittest discover -s tests -v
+node --test tests/test_pages.js
+```
+
+Python 测试使用现有依赖链中的 httpx，页面行为测试使用 Node 内置 test/vm，不需新增依赖。覆盖登录、过期、退出、页面跳转、权限、记忆文件工具、SSE 思考与工具事件、会话继续/重启恢复/删除和上下文用量。
 
 ## 十、本地敏感数据
 
-- `DEEP_AGENT_MODEL_API_KEY` 只从环境变量读取，不要写回 `config.py` 或提交到版本库。
+- `DEEP_AGENT_MODEL_API_KEY` 写在项目根目录的 `.env` 里，启动时自动读取。不要写回 `config.py`，也不要提交 `.env`。
 - `data/*.db` 含有记忆与会话原文，默认已被 Git 忽略；不要把它们发给他人。

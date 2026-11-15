@@ -26,7 +26,7 @@
   <div id="app"></div>
 
   <!-- ?v= 用来打破浏览器对旧 shared.js 的缓存；改了图标就往上加一版 -->
-  <script src="/shared.js?v=2"></script>
+  <script src="/shared.js?v=3"></script>
   <script>
     // ------------------------------------------------------------
     // 执行过程组件
@@ -115,6 +115,20 @@
       },
       setup() {
         const messages = ref([]);
+        const currentUser = ref(null);
+        const isLoggingOut = ref(false);
+        const memoryVisible = ref(false);
+        const memoryLoading = ref(false);
+        const memorySaving = ref(false);
+        const memoryLoaded = ref(false);
+        const memoryEditing = ref(false);
+        const memoryContent = ref('');
+        const memoryDraft = ref('');
+        const memoryRevision = ref('');
+        const memoryUpdatedAt = ref(null);
+        const memoryError = ref('');
+        const memoryNotice = ref('');
+        const memoryDialogRef = ref(null);
         const sessions = ref([]);
         const currentSessionId = ref(null);
         const contextUsage = ref({
@@ -239,7 +253,7 @@
 
         async function loadSessions() {
           try {
-            const response = await fetch('/api/sessions');
+            const response = await apiFetch('/api/sessions');
             sessions.value = await responseJson(response);
             sessionError.value = '';
           } catch (error) {
@@ -253,7 +267,7 @@
           }
 
           try {
-            const response = await fetch('/api/sessions', {
+            const response = await apiFetch('/api/sessions', {
               method: 'POST',
             });
             const session = await responseJson(response);
@@ -275,7 +289,7 @@
           }
 
           try {
-            const response = await fetch(
+            const response = await apiFetch(
               '/api/sessions/' + encodeURIComponent(sessionId)
             );
             const session = await responseJson(response);
@@ -308,7 +322,7 @@
           if (!confirmed) return;
 
           try {
-            const response = await fetch(
+            const response = await apiFetch(
               '/api/sessions/' + encodeURIComponent(sessionId),
               { method: 'DELETE' }
             );
@@ -383,7 +397,7 @@
 
           try {
             // 会话编号放进 URL；后端会把本轮消息写入对应检查点
-            const response = await fetch(
+            const response = await apiFetch(
               '/api/sessions/'
                 + encodeURIComponent(sessionId)
                 + '/stream',
@@ -567,10 +581,167 @@
           isGenerating.value = false;
         }
 
-        onMounted(loadSessions);
+        function applyMemorySnapshot(data) {
+          memoryContent.value = data.content;
+          memoryDraft.value = data.content;
+          memoryRevision.value = data.revision;
+          memoryUpdatedAt.value = data.updated_at || null;
+          memoryLoaded.value = true;
+          memoryEditing.value = false;
+        }
+
+        function hasMemoryChanges() {
+          return memoryEditing.value && memoryDraft.value !== memoryContent.value;
+        }
+
+        async function loadMemory() {
+          if (memoryLoading.value || memorySaving.value) return;
+          if (hasMemoryChanges() && !window.confirm('重新加载会丢弃未保存的修改，是否继续？')) return;
+          memoryLoading.value = true;
+          memoryError.value = '';
+          memoryNotice.value = '';
+          try {
+            const response = await apiFetch('/api/memory');
+            applyMemorySnapshot(await responseJson(response));
+          } catch (error) {
+            memoryError.value = error.message;
+          } finally {
+            memoryLoading.value = false;
+          }
+        }
+
+        async function openMemory() {
+          if (memoryLoading.value || memorySaving.value) return;
+          memoryVisible.value = true;
+          nextTick(function () {
+            if (memoryDialogRef.value && !memoryDialogRef.value.open) {
+              memoryDialogRef.value.showModal();
+            }
+          });
+          await loadMemory();
+        }
+
+        function closeMemory() {
+          if (memoryLoading.value || memorySaving.value) return;
+          if (hasMemoryChanges() && !window.confirm('放弃尚未保存的记忆修改？')) return;
+          if (memoryDialogRef.value) memoryDialogRef.value.close();
+          memoryVisible.value = false;
+          memoryDraft.value = memoryContent.value;
+          memoryEditing.value = false;
+        }
+
+        function editMemory() {
+          if (!memoryLoaded.value || memoryLoading.value || memorySaving.value) return;
+          memoryEditing.value = true;
+          memoryNotice.value = '';
+        }
+
+        function cancelMemoryEdit() {
+          if (memoryLoading.value || memorySaving.value) return;
+          memoryDraft.value = memoryContent.value;
+          memoryEditing.value = false;
+          memoryError.value = '';
+        }
+
+        async function saveMemory() {
+          if (!memoryLoaded.value || !memoryEditing.value || memoryLoading.value || memorySaving.value) return;
+          memorySaving.value = true;
+          memoryError.value = '';
+          memoryNotice.value = '';
+          try {
+            const response = await apiFetch('/api/memory', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: memoryDraft.value, revision: memoryRevision.value }),
+            });
+            applyMemorySnapshot(await responseJson(response));
+            memoryNotice.value = '已保存。建议新建会话使用最新记忆。';
+          } catch (error) {
+            memoryError.value = error.message;
+          } finally {
+            memorySaving.value = false;
+          }
+        }
+
+        async function clearMemory() {
+          if (!memoryLoaded.value || memoryLoading.value || memorySaving.value) return;
+          if (!window.confirm('确认清空当前账号的长期记忆？将恢复空模板并丢弃未保存修改，不会删除历史聊天。')) return;
+          memorySaving.value = true;
+          memoryError.value = '';
+          memoryNotice.value = '';
+          try {
+            const response = await apiFetch('/api/memory', {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ revision: memoryRevision.value }),
+            });
+            applyMemorySnapshot(await responseJson(response));
+            memoryNotice.value = '已清空并恢复空模板。建议新建会话继续。';
+          } catch (error) {
+            memoryError.value = error.message;
+          } finally {
+            memorySaving.value = false;
+          }
+        }
+
+        function memoryTime(value) {
+          return value ? new Date(value).toLocaleString() : '尚未保存';
+        }
+
+        async function initialize() {
+          try {
+            const response = await apiFetch('/api/auth/me');
+            currentUser.value = await responseJson(response);
+            await loadSessions();
+          } catch (error) {
+            sessionError.value = error.message;
+          }
+        }
+
+        async function handleLogout() {
+          if (isLoggingOut.value) return;
+          isLoggingOut.value = true;
+          if (activeRequest) activeRequest.abort();
+          try {
+            const response = await apiFetch('/api/auth/logout', { method: 'POST' });
+            if (!response.ok) throw new Error('退出失败，请稍后重试');
+            messages.value = [];
+            sessions.value = [];
+            currentUser.value = null;
+            redirectToLogin(false);
+          } catch (error) {
+            sessionError.value = error.message;
+          } finally {
+            isLoggingOut.value = false;
+          }
+        }
+
+        onMounted(initialize);
 
         return {
           messages,
+          currentUser,
+          isLoggingOut,
+          handleLogout,
+          memoryVisible,
+          memoryLoading,
+          memorySaving,
+          memoryLoaded,
+          memoryEditing,
+          memoryContent,
+          memoryDraft,
+          memoryUpdatedAt,
+          memoryError,
+          memoryNotice,
+          memoryDialogRef,
+          openMemory,
+          closeMemory,
+          loadMemory,
+          editMemory,
+          cancelMemoryEdit,
+          saveMemory,
+          clearMemory,
+          memoryTime,
           sessions,
           currentSessionId,
           contextUsage,
@@ -596,6 +767,50 @@
       },
       template: `
         <div class="flex h-screen bg-gray-50 text-gray-900 overflow-hidden font-sans">
+          <dialog
+            v-if="memoryVisible"
+            ref="memoryDialogRef"
+            @cancel.prevent="closeMemory"
+            aria-labelledby="memory-title"
+            class="m-auto max-w-3xl max-h-[90vh] rounded-2xl border-0 p-0 shadow-2xl backdrop:bg-black/40"
+            style="width: calc(100% - 2rem)"
+          >
+            <div class="p-5 sm:p-7 space-y-4">
+              <div class="flex items-center justify-between gap-4">
+                <h2 id="memory-title" class="text-lg font-semibold text-gray-900">我的长期记忆</h2>
+                <button @click="closeMemory" :disabled="memoryLoading || memorySaving" class="text-sm text-gray-500 disabled:opacity-40">关闭</button>
+              </div>
+              <p class="text-sm leading-relaxed text-gray-500">只查看和管理当前账号的记忆。修改后建议新建会话；已有会话可能仍使用原来的记忆。清空记忆不会删除历史聊天。</p>
+              <p v-if="memoryError" role="alert" class="text-sm text-rose-600 whitespace-pre-wrap">{{ memoryError }}</p>
+              <p v-if="memoryNotice" role="status" class="text-sm text-emerald-700">{{ memoryNotice }}</p>
+              <p v-if="memoryLoading" role="status" class="text-sm text-gray-500">正在加载记忆…</p>
+              <div v-if="memoryLoaded" class="space-y-2">
+                <div class="flex flex-wrap justify-between gap-2 text-xs text-gray-500">
+                  <label for="memory-content">{{ memoryEditing ? '编辑记忆（纯文本 / Markdown）' : '记忆内容' }}</label>
+                  <span>{{ memoryDraft.length }} 字符 · 更新于 {{ memoryTime(memoryUpdatedAt) }}</span>
+                </div>
+                <textarea
+                  id="memory-content"
+                  v-model="memoryDraft"
+                  :readonly="!memoryEditing"
+                  :disabled="memoryLoading || memorySaving"
+                  maxlength="100000"
+                  rows="12"
+                  placeholder="暂无记忆。点击“编辑”添加用户偏好或背景。"
+                  class="w-full rounded-xl border border-gray-200 p-4 text-sm font-mono leading-relaxed outline-none focus:ring-2 focus:ring-violet-400 read-only:bg-gray-50 disabled:opacity-60"
+                ></textarea>
+              </div>
+              <div class="flex flex-wrap items-center gap-3 text-sm">
+                <button @click="loadMemory" :disabled="memoryLoading || memorySaving" class="px-3 py-2 border border-gray-200 rounded-lg disabled:opacity-40">重新加载</button>
+                <button v-if="!memoryEditing" @click="editMemory" :disabled="!memoryLoaded || memoryLoading || memorySaving" class="px-3 py-2 bg-violet-600 text-white rounded-lg disabled:opacity-40">编辑</button>
+                <template v-else>
+                  <button @click="saveMemory" :disabled="memoryLoading || memorySaving" class="px-3 py-2 bg-violet-600 text-white rounded-lg disabled:opacity-40">{{ memorySaving ? '处理中…' : '保存' }}</button>
+                  <button @click="cancelMemoryEdit" :disabled="memoryLoading || memorySaving" class="px-3 py-2 border border-gray-200 rounded-lg disabled:opacity-40">取消编辑</button>
+                </template>
+                <button @click="clearMemory" :disabled="!memoryLoaded || memoryLoading || memorySaving" class="ml-auto px-3 py-2 text-rose-600 border border-rose-200 rounded-lg disabled:opacity-40">清空记忆</button>
+              </div>
+            </div>
+          </dialog>
           <!-- 侧边栏 -->
           <div class="w-[280px] bg-white border-r border-gray-200 flex-col hidden md:flex transition-all text-gray-700 z-20">
             <div class="p-5">
@@ -642,12 +857,14 @@
             </div>
 
             <div class="p-4 border-t border-gray-100 space-y-1">
-              <button class="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-violet-50 text-sm transition-colors group text-gray-600">
+              <button @click="openMemory" class="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-violet-50 text-sm transition-colors group text-gray-600">
                 <icon-database class="w-4 h-4 text-gray-400 group-hover:text-violet-600 transition-colors" />
-                <span class="font-medium group-hover:text-violet-900 transition-colors">记忆查看区</span>
+                <span class="font-medium group-hover:text-violet-900 transition-colors">记忆管理</span>
               </button>
               <button
                 type="button"
+                @click="handleLogout"
+                :disabled="isLoggingOut"
                 class="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-rose-50 text-gray-500 hover:text-rose-600 text-sm transition-colors group"
               >
                 <icon-log-out class="w-4 h-4 group-hover:text-rose-600 transition-colors" />
@@ -666,8 +883,10 @@
                 </div>
                 <span class="font-semibold text-gray-800 text-sm tracking-wide">Agent 工作台</span>
               </div>
-              <div class="text-xs text-violet-700 bg-violet-50 border border-violet-100 px-3 py-1.5 rounded-full font-medium shadow-sm">
-                单用户会话模式
+              <div class="flex items-center gap-3 text-xs text-violet-700">
+                <span class="bg-violet-50 border border-violet-100 px-3 py-1.5 rounded-full font-medium shadow-sm">{{ currentUser ? currentUser.username : '正在验证登录…' }}</span>
+                <button @click="openMemory" class="md:hidden text-gray-500 hover:text-violet-600">记忆</button>
+                <button @click="handleLogout" :disabled="isLoggingOut" class="md:hidden text-gray-500 hover:text-rose-600">退出</button>
               </div>
             </header>
 

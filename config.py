@@ -3,9 +3,25 @@
 # 以后换模型、换服务器地址，只需要改这一个文件，其他文件不用动。
 # 各阶段的测试问题不在这里，在 questions.py 里。
 
-# 从操作系统环境变量中读取密钥，避免把它提交到版本库。
-# PowerShell 临时设置示例：$env:DEEP_AGENT_MODEL_API_KEY = "你的密钥"
+# 配置优先读系统环境变量；没有或为空时，再读项目根目录的 .env。
+# .env 示例：DEEP_AGENT_MODEL_API_KEY=你的密钥
 import os
+from pathlib import Path
+
+from dotenv import dotenv_values
+
+_DOTENV_VALUES = dotenv_values(Path(__file__).resolve().parent / ".env")
+
+
+def _setting(name: str) -> str:
+    """系统环境变量优先；未设置或为空时，再用 .env 里的值。"""
+    system_value = os.environ.get(name)
+    if system_value is not None and system_value.strip() != "":
+        return system_value.strip()
+    file_value = _DOTENV_VALUES.get(name)
+    if file_value is None:
+        return ""
+    return file_value.strip()
 
 # ---------------------------------------------------------------
 # 一、模型服务（必须改这两项）
@@ -13,18 +29,19 @@ import os
 
 # 模型服务的地址，注意结尾要带 /v1
 # 例如：http://192.168.1.10:8000/v1
-MODEL_BASE_URL = "https://llm.thunisoft.com/v1"
+MODEL_BASE_URL = _setting("DEEP_AGENT_MODEL_BASE_URL")
 
 # 模型名，要和 curl .../v1/models 返回结果里的 id 完全一致（区分大小写）
-MODEL_NAME = "Qwen3.8-27B"
+MODEL_NAME = _setting("DEEP_AGENT_MODEL_NAME")
 
 # ---------------------------------------------------------------
 # 二、模型调用参数（可以先不改）
 # ---------------------------------------------------------------
 
 # 自己部署的服务一般不校验密钥，但 ChatOpenAI 要求必须传一个值。
-# 不在代码中保存真实值；请在启动前设置 DEEP_AGENT_MODEL_API_KEY。
-MODEL_API_KEY = os.getenv("DEEP_AGENT_MODEL_API_KEY", "")
+# 不在代码中保存真实值；可写在系统环境变量或项目根目录的 .env 里，系统环境变量优先。
+#MODEL_API_KEY = _setting("DEEP_AGENT_MODEL_API_KEY")
+MODEL_API_KEY = _setting("MINIMAX_API_KEY")
 
 # 温度：越低回答越稳定，越高越发散。做工具调用时建议偏低
 # 注意：Qwen3.8 官方给的非思考模式推荐采样参数是 temperature 0.7、top_p 0.8、
@@ -100,3 +117,10 @@ FIX_STREAM_USAGE = True
 #   2. 还要给模型的输出（思考加回答）留出空间
 # 所以填上下文长度的一半，留足余量。运行时会显示每次请求的真实 token 数，可以据此调整
 MODEL_MAX_INPUT_TOKENS = 8192
+
+# 七、阶段 7B：Web 身份验证
+AUTH_DB_PATH = "data/users.db"
+AUTH_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+AUTH_COOKIE_NAME = "deep_agent_session"
+# 本机 HTTP 使用 False；HTTPS 部署时通过环境变量或 .env 设置为 true。
+AUTH_COOKIE_SECURE = _setting("DEEP_AGENT_COOKIE_SECURE").lower() == "true"

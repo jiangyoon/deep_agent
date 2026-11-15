@@ -13,6 +13,8 @@
 # 这样和 Agent 自己写入的格式完全一致。
 
 import os
+import hashlib
+import json
 from contextlib import contextmanager
 
 from deepagents.backends.utils import (
@@ -31,6 +33,15 @@ MEMORY_FILE_PATH = "/memories/AGENTS.md"
 # 数据库里的分组和键
 MEMORY_NAMESPACE = ("deep_agent", "memories")
 MEMORY_KEY = "/AGENTS.md"
+
+
+def get_memory_namespace(user_id=None):
+    """Web 用户各自独立；终端学习入口使用原有本地分组。"""
+    if user_id is None:
+        return MEMORY_NAMESPACE
+    if not isinstance(user_id, str) or not user_id:
+        raise ValueError("记忆用户 ID 不能为空")
+    return ("deep_agent", "users", user_id, "memories")
 
 # 第一次运行时预置的模板。
 # 为什么要预置：框架让模型用 edit_file 更新记忆，而 edit_file 只能改"已经存在的文件"，
@@ -72,32 +83,47 @@ def open_store():
         yield store
 
 
-def read_memory(store):
+def read_memory(store, user_id=None):
     """读取记忆正文。还没有记忆时返回 None。"""
-    item = store.get(MEMORY_NAMESPACE, MEMORY_KEY)
+    item = store.get(get_memory_namespace(user_id), MEMORY_KEY)
     if item is None:
         return None
     return file_data_to_string(item.value)
 
 
-def write_memory(store, text):
+def memory_snapshot(store, user_id):
+    """返回当前用户的正文与版本指纹；只读，不预置或修改记忆。"""
+    item = store.get(get_memory_namespace(user_id), MEMORY_KEY)
+    value = item.value if item is not None else None
+    content = file_data_to_string(value) if value is not None else ""
+    serialized = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return {
+        "content": content,
+        "revision": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        "char_count": len(content),
+        "updated_at": value.get("modified_at") if value is not None else None,
+    }
+
+
+def write_memory(store, text, user_id=None):
     """用 text 整体替换记忆正文。已有记忆时保留它的创建时间。"""
-    item = store.get(MEMORY_NAMESPACE, MEMORY_KEY)
+    namespace = get_memory_namespace(user_id)
+    item = store.get(namespace, MEMORY_KEY)
     if item is None:
         file_data = create_file_data(text)
     else:
         file_data = update_file_data(item.value, text)
-    store.put(MEMORY_NAMESPACE, MEMORY_KEY, file_data)
+    store.put(namespace, MEMORY_KEY, file_data)
 
 
-def seed_memory_if_missing(store):
+def seed_memory_if_missing(store, user_id=None):
     """还没有记忆时，写入空模板。返回 True 表示这次新建了模板。"""
-    if read_memory(store) is None:
-        write_memory(store, MEMORY_TEMPLATE)
+    if read_memory(store, user_id) is None:
+        write_memory(store, MEMORY_TEMPLATE, user_id)
         return True
     return False
 
 
-def clear_memory(store):
+def clear_memory(store, user_id=None):
     """删除记忆。"""
-    store.delete(MEMORY_NAMESPACE, MEMORY_KEY)
+    store.delete(get_memory_namespace(user_id), MEMORY_KEY)
