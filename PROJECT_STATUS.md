@@ -4,11 +4,12 @@
 >
 > 当前分支：`main`
 >
-> 当前 HEAD：`ebf871c docs: clean handoff formatting`
+> 7B 与记忆管理功能提交：`dfc744b 增加7A7B实现`
 
 > 7A 功能基线：`a17a320 feat: complete single-user web chat`
 >
-> 当前工作区：7B-1 后端认证与隔离、7B-2 页面接入、Web 记忆管理及 macOS 环境配置改动，尚未提交。
+> 7B-1 后端认证与隔离、7B-2 页面接入、Web 记忆管理及 macOS 环境配置改动已纳入上述提交。
+> 单位电脑应拉取 `origin/main`，确认包含该功能提交及后续交接文档更新。
 
 这份文档用于在另一台电脑或新的 Codex 任务中继续开发。它记录当前真实进度、
 关键设计、运行方式、已知限制和下一步，不包含模型密钥或真实会话内容。
@@ -17,11 +18,11 @@
 
 ### 0.1 先确认代码已经同步
 
-本次检查时，7B 和记忆管理代码仍在个人 Mac 的未提交工作区中，不能仅在单位电脑执行
-`git pull` 就假定能获取。需要先在 Mac 上把确认后的代码与本文档提交并推送，
-或使用其他明确的文件同步方式。本轮没有执行提交或推送。
+7B 和记忆管理代码已经提交为 `dfc744b`。用户已要求将代码和交接文档推送到
+`origin/main`。单位电脑更新后，确认日志包含该功能提交和后续交接文档更新，
+不要只根据文件夹名称判断代码版本。
 
-应一起同步的内容：
+功能提交包含以下内容：
 
 - 新增：`core/user_store.py`、`web/auth.py`、`manage_users.py`、`tests/`、`docs/plans/`。
 - 修改：`core/agent_builder.py`、`core/backend_builder.py`、`core/memory_store.py`、
@@ -29,8 +30,16 @@
 - 配置与文档：`config.py`、`core/llm_model.py`、`requirements.txt`、`README.md`、本文档。
 - 工作记录：`task_plan.md`、`findings.md`、`progress.md`。
 
-代码同步后，在单位电脑先执行 `git status --short` 和 `git log -4 --oneline`，
-确认自己的本地改动，再按实际同步方式更新代码；不要覆盖未确认的本地工作。
+在单位电脑先检查本地改动和提交，再拉取；不要覆盖未确认的本地工作：
+
+```powershell
+git status --short
+git log -4 --oneline
+git pull --ff-only origin main
+git log -4 --oneline
+```
+
+如果本地存在未提交工作或分支已分叉，应先检查差异，不要自动重置或强制覆盖。
 
 ### 0.2 复用单位原来的环境
 
