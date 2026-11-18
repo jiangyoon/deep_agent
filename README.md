@@ -1,194 +1,34 @@
-# deep_agent 学习工程
+# 员工职业规划智能体
 
-用 Deep Agents 框架做一个 Web 问答 Agent 的学习工程，后端模型是自部署的 Qwen（vLLM，OpenAI 兼容接口）。
-目前完成阶段 2–6、7A 单用户 Web，以及 7B 登录与多用户隔离（后端和页面）。最新进度见 `PROJECT_STATUS.md`。
+首个业务场景是员工证书与职称咨询。Web 端提供登录、会话恢复、用户记忆和流式聊天。当前处于工程迁移阶段，KB1 已入库，在线问答将在下一步接入。进度见 [PROJECT_STATUS.md](PROJECT_STATUS.md)。
 
-## 一、第一次使用
+## 启动
 
-1. Python 3.13，建议新建独立的 conda 环境：
+在项目根目录运行。已有环境和账号可直接沿用。首次配置时，以 [配置模板](.env.example) 为模板建立根目录的 `.env`，填入模型地址、模型名和密钥。系统环境变量优先。
 
-   ```
-   conda create -n deep_agent python=3.13 -y
-   conda activate deep_agent
-   pip install -r requirements.txt
-   ```
-
-2. 打开 `config.py`，把这两项改成你自己的值：
-   - `MODEL_BASE_URL`：模型服务地址，结尾带 `/v1`
-   - `MODEL_NAME`：模型 id，用 `curl.exe 地址/models` 可以查到
-
-   再在项目根目录新建 `.env`，写入模型密钥：
-
-   ```
-   DEEP_AGENT_MODEL_API_KEY=你的密钥
-   ```
-
-   这两项没改、或没有设置密钥时，程序启动会直接提示，不会去连一个不存在的地址。
-
-3. 在 `deep_agent` 文件夹下运行下面的入口。
-
-## 二、入口文件（都在根目录，用 `python 文件名.py` 运行）
-
-| 文件 | 作用 |
-|---|---|
-| `stage2_invoke.py` | 阶段 2：invoke 方式，等 Agent 全部做完一次性显示，列出每条消息 |
-| `stage2_stream.py` | 阶段 2：流式方式，每一步实时显示，思考和回答逐字显示 |
-| `stage3_tools.py` | 阶段 3：测试自定义工具（查时间、除法、职业知识库检索） |
-| `stage4_skills.py` | 阶段 4：测试预置的只读 Skill，步骤里会标注"读取 Skill 文件" |
-| `stage5_memory.py` | 阶段 5：测试记忆，每个问题后显示记忆有没有变化 |
-| `manage_memory.py` | 记忆管理：`show` 查看、`clear` 清空、`replace 文件路径` 整体替换 |
-| `stage6_chat.py` | 阶段 6：交互式多轮对话，会话保存后可接着聊（/new /list /switch /quit） |
-| `manage_sessions.py` | 会话管理：`list` 列出、`show 编号` 查看、`delete 编号` 删除 |
-| `manage_users.py` | Web 用户管理：`create 用户名`，交互输入密码 |
-| `stage7_web.py` | 启动 Web 后端，默认地址 `http://127.0.0.1:8000` |
-
-## 三、目录结构
-
-```
-deep_agent/
-├── config.py            设置：模型地址、模型名、温度、思考模式、系统提示词
-├── questions.py         各阶段的测试问题（想换问题测试，改这里）
-├── requirements.txt     依赖，版本已固定
-├── README.md
-│
-├── stage2_invoke.py     入口
-├── stage2_stream.py     入口
-├── stage3_tools.py      入口
-├── stage4_skills.py     入口
-├── stage5_memory.py     入口
-├── manage_memory.py     记忆管理工具
-├── stage6_chat.py       入口
-├── manage_sessions.py   会话管理工具
-│
-├── core/                所有阶段共用，长期保留
-│   ├── llm_model.py       创建模型连接（含"设置没填"的检查）
-│   ├── thinking_mode.py   把思考模式设置翻译成发给服务端的参数
-│   ├── agent_builder.py   把模型、提示词、工具、Skill 组装成 Agent
-│   ├── backend_builder.py 准备文件系统：/skills/ 指向 skills 文件夹（只读），/memories/ 指向记忆数据库
-│   ├── memory_store.py    记忆的存储：打开数据库、读取、替换、清空（换数据库主要改这里）
-│   ├── session_store.py   会话的存储：打开会话数据库、列出、读取、删除会话
-│   └── tool_call_collector.py 把流式片段里零散的工具调用拼成完整的工具调用
-│
-├── my_tools/            自定义工具
-│   ├── __init__.py        登记所有工具（ALL_TOOLS 列表）
-│   ├── time_tool.py       查询城市当前时间
-│   ├── math_tool.py       除法
-│   └── knowledge_tool.py  职业知识库检索（练习用，返回的是模拟数据）
-│
-├── skills/              预置 Skill（只读），每个 Skill 一个文件夹
-│   ├── career-kb-qa/      职业知识库问答规范（严格模式：只依据检索结果回答）
-│   │   └── SKILL.md
-│   └── time-zone-helper/  跨城市时间换算
-│       ├── SKILL.md
-│       └── references/cities.md   参考文件，模型需要时才会读
-│
-├── display/             终端打印，学习阶段用来观察运行过程
-│   ├── printer.py         invoke 方式：逐条打印消息
-│   ├── stream_handler.py  流式方式：整理流式片段（思考、回答、步骤）
-│   ├── stream_runner.py   流式提问（多个入口共用）
-│   ├── memory_view.py     显示记忆内容和变化
-│   └── error_hint.py      出错时的排查提示
-```
-
-文件之间的依赖方向是单向的：入口依赖 `core`、`display`，`core` 依赖 `my_tools` 和 `config`，
-`display` 和 `my_tools` 互不依赖。入口文件之间不互相导入。
-
-## 四、常用设置
-
-- 思考模式：`config.py` 里的 `THINKING_MODE`，`"default"` 开启思考，`"low"` 缩短思考，`"off"` 关闭思考。
-- 换测试问题：改 `questions.py`。
-- 加工具：在 `my_tools` 里新建一个工具文件，然后在 `my_tools/__init__.py` 里导入并加进 `ALL_TOOLS`。
-- 工具里不要抛异常：工具一旦抛出异常，整个 Agent 会直接崩溃，模型看不到错误。遇到问题请返回一段说明文字。
-
-## 五、Skill 怎么用
-
-- 一个 Skill 就是 `skills/` 下的一个文件夹，里面有 `SKILL.md`，开头写名称和简介。
-- 名称只能用小写字母、数字和连字符，不超过 64 个字符，**必须和文件夹名一致**；简介不超过 1024 个字符。
-- 模型一开始只在系统提示里看到每个 Skill 的名字和简介，需要时才去读 `SKILL.md` 全文，
-  `SKILL.md` 里提到的参考文件，它也是需要时才读。
-- 实测：启用 Skill 后系统提示固定增加约 1900 个字符（使用说明），每多一个 Skill 再增加约 130 个字符。
-- Skill 是只读的：`core/backend_builder.py` 里设置了权限规则，禁止对 `/skills/` 下的文件做修改、新建、删除。
-- 想对比"没有 Skill"的效果：把 `config.py` 里的 `USE_SKILLS` 改成 `False`。
-
-## 六、记忆怎么用
-
-- 记忆是一个文件 `/memories/AGENTS.md`（Agent 眼里的路径），实际存在 `data/memory.db`（SQLite 数据库）里，程序重启后还在。
-- 每次运行开始时，记忆全文会放进系统提示；Agent 根据框架自带的规则，自己决定什么时候用 `edit_file` 更新它。
-- 第一次运行时会预置一个带标题的空模板，因为 `edit_file` 只能改已经存在的文件。
-- 记忆每次请求都会带上，`config.py` 里的 `MEMORY_WARN_CHARS` 是提醒整理的字数。
-- Web 用户可在聊天页点击“记忆管理”，查看、编辑、保存或清空自己的记忆，不经过模型。
-- `manage_memory.py` 继续管理终端学习入口的独立记忆分组，不管理 Web 用户记忆。
-- `stage5_memory.py` 里关掉了 Skill，避免 `career-kb-qa` 的"只依据知识库回答"规则干扰对记忆的观察。
-- 以后换成达梦等数据库，主要改 `core/memory_store.py` 里的 `open_store()`，但需要先有该数据库的 LangGraph Store 实现。
-
-### Web 记忆管理
-
-登录后点击侧栏“记忆管理”（手机端点击顶部“记忆”）。窗口展示当前用户的
-`/memories/AGENTS.md` 内容、字符数和更新时间，点击“编辑”可全文修改；“取消编辑”
-恢复打开时的内容，不写入数据库。“保存”写入后可重新加载验证，服务重启后仍保留。
-
-“清空记忆”需要确认，确认后恢复空模板，方便 Agent 继续更新记忆，不删除聊天历史。
-保存和清空会核对打开时的版本；其他窗口或 Agent 已更新内容时，旧版本返回冲突，
-草稿保留，请先复制需要的草稿，再确认重新加载。生成或其他写入操作进行中时，请稍后重试。
-
-手动修改后的内容会被新会话加载，已有会话可能仍保留检查点中的旧记忆。管理范围是
-当前用户的主记忆文件，不包含导入导出和历史版本。本轮练习只补齐记忆管理，其他增强功能暂不做。
-
-## 七、会话怎么用
-
-- 会话保存在 `data/sessions.db`，和记忆的 `data/memory.db` 是两个独立的数据库。
-- 每个会话有一个编号（thread_id），带同一个编号提问就是接着聊；程序重启后历史还在。
-- 每一轮发给模型的都是这个会话的全部历史，会话越长，每次请求越大；终端里会显示每次请求的真实 token 数。
-- 对话太长时框架会自动压缩：用一次额外的模型调用把早期对话总结成摘要，这次调用不会显示在终端上。
-  会话里保存的原始消息不会被删，只是发给模型时用摘要代替。
-- 同一个会话里，记忆只在会话开始时加载一次，之后记忆有更新也不会进入这个会话，开新会话才会看到。
-- 对话原文会明文保存在会话数据库里，包括用户说出的密码、密钥等，删除用 `manage_sessions.py delete`。
-- `config.py` 里的 `MODEL_MAX_INPUT_TOKENS` 决定什么时候自动压缩，设成了上下文长度的一半，原因见那里的注释。
-
-## 八、维护约定
-
-- 新增一个学习阶段，就在根目录新增一个 `stageN_xxx.py` 入口，共用代码放进 `core` 或 `display`，不要让入口互相导入。
-- 本地文件夹名不要和第三方包重名（例如不要新建 `langchain.py`、`openai.py`），否则会出现难以看懂的导入错误。
-- `requirements.txt` 里的版本号不要随意升级。`langchain-deepseek` 用于保存 vLLM 返回的思考内容，升级前先确认思考内容还能正常显示。
-
-## 九、后续阶段
-
-7A 已完成 Web 聊天；7B-1 已完成后端登录和多用户隔离；7B-2 已接入登录页面、当前用户与退出、登录过期处理。下一阶段待确定。
-
-### 7B 使用方法
-
-在已有环境内执行：
-
-```bash
+```powershell
 conda activate deep_agent
-python manage_users.py create alice
-python stage7_web.py
+python -m uvicorn career_agent.web.app:app --host 127.0.0.1 --port 8000
 ```
 
-脚本会隐藏输入两次密码。用户名支持 1–64 位字母、数字、下划线和连字符，区分大小写；密码长度为 8–128 位。脚本直接连接 `data/users.db` 创建账号，不提供公开注册接口。
+浏览器打开 [本地工作台](http://127.0.0.1:8000)。健康检查地址为 [`/health`](http://127.0.0.1:8000/health)。
 
-打开 `http://127.0.0.1:8000`，未登录会自动进入登录页面。用脚本创建的账号登录后进入聊天页，顶部显示用户名，点击“退出登录”返回登录页。登录过期后会提示重新登录，并停止后续匿名 API 请求。
+如需新建账号，在项目根目录执行以下命令，按提示输入密码。
 
-也可以打开 `http://127.0.0.1:8000/docs` 验证 API：调用 `POST /api/auth/login`，请求体为 `{"username":"alice","password":"你设置的密码"}`。浏览器保存 HttpOnly Cookie 后，可调用 `GET /api/auth/me`、会话接口和 `POST /api/auth/logout`。
-
-- 登录固定有效期 7 天，退出和重新登录会撤销当前旧凭证。
-- `users.db` 保存用户、登录凭证摘要和聊天会话归属；`sessions.db` 保存检查点；`memory.db` 按 Web 用户隔离长期记忆。
-- 新建空会话立即保存归属，也会出现在列表中。未登录返回 401；其他用户的会话或不存在的会话返回 404。
-- 早期 `/api/chat` 和 `/api/chat/stream` 已移除，统一使用有归属的会话接口。
-- 当前 SQLite 同步执行链同时只运行一条生成请求；生成期间其他生成或删除请求返回 409，稍后可重试。
-- 本地 HTTP 默认不设置 Secure Cookie；HTTPS 部署时在环境变量或 `.env` 中设置 `DEEP_AGENT_COOKIE_SECURE=true`。
-- 不迁移旧单用户数据；终端学习入口继续使用独立的本地记忆分组，不读取 Web 用户记忆。
-
-验证命令（临时数据库、假模型，不调用真实模型）：
-
-```bash
-python -m unittest discover -s tests -v
-node --test tests/test_pages.js
+```powershell
+python -m scripts.manage_users create 用户名
 ```
 
-Python 测试使用现有依赖链中的 httpx，页面行为测试使用 Node 内置 test/vm，不需新增依赖。覆盖登录、过期、退出、页面跳转、权限、记忆文件工具、SSE 思考与工具事件、会话继续/重启恢复/删除和上下文用量。
+其他管理命令使用 `python -m scripts.manage_sessions` 和 `python -m scripts.manage_memory` 查看用法。Web 用户在聊天页管理自己的记忆。终端记忆命令管理本地共享记忆。
 
-## 十、本地敏感数据
+## 目录
 
-- `DEEP_AGENT_MODEL_API_KEY` 写在项目根目录的 `.env` 里，启动时自动读取。不要写回 `config.py`，也不要提交 `.env`。
-- `data/*.db` 含有记忆与会话原文，默认已被 Git 忽略；不要把它们发给他人。
+- `career_agent/agent/` 组装 Deep Agent，定义系统提示词及业务工具入口。
+- `career_agent/skills/` 存放证书与职称咨询 Skill。Agent 以只读方式加载。
+- `career_agent/knowledge/` 是在线 KB1 代码的接入位置。
+- `career_agent/core/` 提供模型、用户、会话和记忆存储。
+- `career_agent/web/` 提供 FastAPI、页面和 SSE。
+- `scripts/kb1/` 存放离线清洗、迁移、校验及向量入库命令，依赖和连接参数示例随脚本存放。
+- `data/` 存放本地 SQLite、客户原始资料和处理产物。运行数据和真实配置保存在本机。
+
+KB1 的清洗与只读校验命令见 [第一批资料处理结果](docs/第一批资料处理结果.md)。

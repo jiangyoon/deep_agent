@@ -16,6 +16,7 @@ venv/
 !.env.example
 data/*.db
 data/*.db-*
+data/material_review/
 
 # 后续 Web 层生成的运行日志
 *.log
