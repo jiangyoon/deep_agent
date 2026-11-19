@@ -1,17 +1,44 @@
 # 员工职业规划智能体项目状态
 
-当前分支为 `codex/employee-career-planning`。首个场景是员工证书与职称咨询。
+更新于 **2026-11-19**。当前分支：`codex/employee-career-planning`。
+
+**第一批知识库数据已入库，应用 PostgreSQL 表已初始化。** 员工证书与职称咨询只提供政策依据、路径建议和流程指引；不代办申报、发放奖励或报销。员工资料保存在各自的记忆里，暂不接员工系统；外部政策查询先预留客户 WebSearch 工具接口。
 
 ## 工程
 
 - 应用代码位于 `career_agent/`。正式 Web 启动、用户创建和运维命令见 [README](README.md)。
-- 登录、会话持久化和用户记忆继续使用项目根目录 `data/` 下原有的 SQLite 文件。模型配置从根目录 `.env` 或系统环境变量读取。
-- Agent 已加载证书咨询 Skill。在线 KB1 检索待接入。
+- 登录、会话持久化和用户记忆使用 `career` 数据库中的 `deep_agent` schema。应用以 `sa` 连接，复用 `.env` 中的 `PG*` 参数。
+- 目标库已初始化并回读核实 10 张表。初始化时账号、登录凭证、会话、检查点和记忆表均为空；旧 SQLite 测试数据留在本机。已验证 Web 应用能连接目标库启动，健康接口和登录页面可访问。创建网页账号的方法见 [README](README.md#启动)。
+- 应用 schema 的 10 张表和 43 个字段已补齐中文注释，并从 PostgreSQL 数据字典回读核实。
+- Agent 已加载证书咨询 Skill；网页还未注册 KB1 查询工具。手工 SQL、独立脚本和 Milvus 抽查通过，不等于网页问答已经接通。
 
-## 知识库
+## 已完成的数据
 
-- 上一轮完成 PostgreSQL 政策资料与 Milvus 索引准备，已核对 `career.career_policy_sections` 的 408 条已入库正文，并抽查 BM25 与 `TEXT_MATCH`。
-- 用户确认已将 44 个 PostgreSQL 来源设为「现行有效」。问答仍需核对资料的适用渠道、地区和年度。
-- 离线处理与入库脚本集中在 `scripts/kb1/`。下一步用现有 KB1 接通真实检索及条款引用。
+| 数据 | 当前结果 |
+|---|---|
+| PostgreSQL `career.public` | 44 个来源、408 条正文、244 条职称对应、70 条奖励、17 条时间事项、33 条附件关系。结构化业务数据以 PostgreSQL 为准，旧达梦库不再使用。 |
+| Milvus `career.career_policy_sections` | 408 条索引，与 PostgreSQL 正文对账一致。Qwen/Qwen3-VL-Embedding-8B，稠密向量 1024 维，另有 BM25 稀疏向量；已抽查 BM25 和 `TEXT_MATCH`。索引文本是「章名＋正文」，不拼文件标题。 |
+| 职称对应 | 北京人社和集团内部各 105 条，保留各自条件和出处；国际 34 条，两条来源冲突不参加默认查询。支持「一建」「软考」等别名，软考可按级别区分。 |
+| 文号 | 已补 4 个明确文号及已知别名。查「182 号」先定位印发通知，再沿附件关系找到制度正文。 |
+| 奖励 | 级别允许 S、A、A-、B、C 或空值；70 条奖励未变。目录共用说明合并成一条，按 `source_id` 查询；旧关联表已删除。新增 `blue_display_names`，21 条记录含标蓝名称。组合奖励仍是一条奖励，网页标蓝尚未实现。 |
 
-业务背景见 [证书咨询需求](docs/intent-certificate-consultation.md) 和 [Agentic RAG 方案](docs/career-planning-agentic-rag-proposal.md)。学习阶段的设计和工作记录见 [历史计划](docs/plans/)。
+文件用 `source_id` 标识，新版分配新 ID。用户已将现有来源设为「现行有效」；在线查询仍须按已确认的渠道、地区、年度和资料类型筛选。这一设置不证明某份目录仍由发文方沿用，也不会使历史、排除或未处理材料成为可引用的正文。
+
+## 应用存储切换后的下一步：接通网页问答
+
+1. 在 `career_agent/knowledge/` 实现在线查询，再注册到 Web Agent。证书对应、奖励、时间和文号走 PostgreSQL；政策正文先在 PostgreSQL 取适用的来源 ID，再用同一 ID 清单在 Milvus 做稠密与 BM25 检索。合并和排序后按条款 ID 回查 PostgreSQL，带上原文、文件名和出处。ID 清单为空时不退回无范围检索。
+2. 用真实问法验收：「我本科机械工程，工作 5 年，有一建，想评高工，需要什么条件？」**不预填文件编号或申报渠道**。看 Agent 能否识别证书、追问适用渠道，区分总工龄与取得前置职称后的年限，并引用正确条款。另外验收「一建在集团内部和北京分别对应什么」「集团高工什么时候截止」「182 号怎么规定」。
+3. 接通通知对应的表格下载、奖励证书名称标蓝；在证书问答中验收员工确认的信息能跨轮复用和更新。证书颜色按数据渲染，蓝色不是职称认定依据。
+
+## 剩余资料
+
+- **7 份未清洗入库**：河北职称专业目录和上下册汇编 3 份、培训攻略 2 份、职称渠道简介 2 份。河北先做目录，再按优先专业处理汇编。完整清单见 [证书资料处理待办](证书资料处理待办.md)。
+- **缺正式报销流程**；奖励目录里的报销上限不能当成办理指引。2025 年奖励目录是否仍沿用、两条国际证书对应冲突待确认。
+- 高工操作手册已入库 28 条文字。原件有 33 张图，正文范围内的 32 张已保存并记录段落位置；未 OCR、未入向量索引，截图独有内容目前不可搜。
+
+## 交接入口
+
+- 现有脚本：[证书映射及简称查询](scripts/kb1/normalize_certificate_mappings.py)、[文号查询](scripts/kb1/add_document_number_lookup.py)、[奖励表迁移](scripts/kb1/simplify_reward_rules.py)、[Milvus 建库](scripts/kb1/create_vector_store.py)、[正文入索引](scripts/kb1/index_sections.py)。**上述数据库迁移和第一批入索引已执行，不要作为接网页的前置步骤重跑。**
+- 第一批基线由 `data/material_review/batches/0848fe37e7ed/first_batch/LATEST.json` 指向 `run08`，包含清洗快照和截图；该目录不进 Git。保留原件和回滚备份。
+
+业务背景见 [证书咨询需求](docs/intent-certificate-consultation.md)，接入设计见 [Agentic RAG 方案](docs/career-planning-agentic-rag-proposal.md)，材料处理规则见 [证书政策文件清洗处理方案](docs/证书政策文件清洗处理方案.md)。

@@ -1,4 +1,4 @@
-"""在终端显示本地共享记忆。"""
+"""在终端显示共享记忆。"""
 
 from career_agent import config
 

@@ -8,14 +8,14 @@
 import sys
 
 from career_agent.agent.builder import build_agent
+from career_agent.core.app_db import APP_SCHEMA, open_app_pool
 from career_agent.core.llm_model import create_llm
 from career_agent.core.messages import print_messages
 from career_agent.core.session_store import (
+    create_checkpointer,
     delete_session,
-    get_session_db_path,
     get_session_messages,
     list_sessions,
-    open_checkpointer,
     session_exists,
 )
 
@@ -38,7 +38,7 @@ def build_reader(saver):
 
 
 def cmd_list(saver):
-    print("数据库文件:", get_session_db_path())
+    print("数据库 schema:", APP_SCHEMA)
     session_ids = list_sessions(saver)
     if len(session_ids) == 0:
         print("（还没有任何会话）")
@@ -78,7 +78,8 @@ def main():
 
     command = sys.argv[1]
 
-    with open_checkpointer() as saver:
+    with open_app_pool() as pool:
+        saver = create_checkpointer(pool)
         if command == "list":
             cmd_list(saver)
         elif command == "show" or command == "delete":

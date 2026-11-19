@@ -3,6 +3,7 @@
 import argparse
 import getpass
 
+from career_agent.core.app_db import AppDatabaseError, open_app_pool
 from career_agent.core.user_store import UserStore
 
 
@@ -16,8 +17,9 @@ def main():
         confirmation = getpass.getpass("再次输入密码：")
         if password != confirmation:
             raise ValueError("两次密码不一致")
-        user = UserStore().create_user(args.username, password)
-    except (ValueError, EOFError, KeyboardInterrupt) as error:
+        with open_app_pool() as pool:
+            user = UserStore(pool).create_user(args.username, password)
+    except (AppDatabaseError, ValueError, EOFError, KeyboardInterrupt) as error:
         parser.exit(1, f"创建失败：{error}\n")
     print(f"已创建用户：{user['username']}")
 

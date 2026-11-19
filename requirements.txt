@@ -7,10 +7,12 @@ langchain-openai==1.7.4
 langchain-deepseek==1.1.1
 # tzdata：Windows 环境的时区数据
 tzdata==2026.6
-# langgraph-checkpoint-sqlite：使用 SQLite 持久化记忆和会话
-langgraph-checkpoint-sqlite==3.1.3
+# PostgreSQL 持久化应用会话和记忆
+langgraph-checkpoint-postgres==3.2.1
 # python-dotenv：启动时读取项目根目录的 .env
 python-dotenv==1.2.2
 # fastapi / uvicorn：Web API 与本地服务入口
 fastapi==0.162.5
 uvicorn==0.54.0
+pymilvus>=2.6,<2.7
+psycopg[binary]>=3.2,<4
