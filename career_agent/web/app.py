@@ -11,16 +11,17 @@ from pydantic import BaseModel, Field
 
 from career_agent import config
 from career_agent.agent.builder import build_agent
+from career_agent.core.app_db import open_app_pool
 from career_agent.core.llm_model import create_llm
 from career_agent.core.memory_store import (
-    MEMORY_TEMPLATE, memory_snapshot, open_store, seed_memory_if_missing, write_memory,
+    MEMORY_TEMPLATE, create_memory_store, memory_snapshot, seed_memory_if_missing, write_memory,
 )
 from career_agent.core.messages import content_to_text
 from career_agent.core.session_store import (
+    create_checkpointer,
     delete_session,
     get_session_messages,
     make_config,
-    open_checkpointer,
     session_exists,
 )
 from career_agent.core.user_store import UserStore
@@ -36,13 +37,13 @@ session_agent_lock = threading.Lock()
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """Web 服务运行期间持续保持记忆库和会话库连接。"""
-    with open_store() as store, open_checkpointer() as saver:
-        application.state.user_store = UserStore()
-        # 当前 SQLite 同步执行链串行运行，避免生成与删除同一会话相互覆盖。
+    """Web 服务运行期间共享应用数据库连接池。"""
+    with open_app_pool() as pool:
+        application.state.user_store = UserStore(pool)
+        # 同步执行链串行运行，避免生成与删除同一会话相互覆盖。
         application.state.session_run_lock = threading.Lock()
-        application.state.memory_store = store
-        application.state.session_saver = saver
+        application.state.memory_store = create_memory_store(pool)
+        application.state.session_saver = create_checkpointer(pool)
         application.state.session_agent = None
         yield
 
@@ -84,7 +85,7 @@ class MemoryRevision(BaseModel):
 
 
 class MemoryUpdate(MemoryRevision):
-    content: str = Field(max_length=100000)
+    content: str = Field(max_length=100000, pattern=r"^[^\x00]*$")
 
 
 def get_session_agent(request: Request):

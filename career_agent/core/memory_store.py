@@ -1,6 +1,6 @@
 # core/memory_store.py
 # 作用：记忆的存储。所有"和数据库打交道"的代码都集中在这一个文件里。
-# 当前使用 SQLite（data/memory.db）。
+# 记忆存放在 PostgreSQL 的应用 schema。
 #
 # 几个名字的对应关系（容易混，单独写清楚）：
 #   Agent 眼里的记忆文件路径：/memories/AGENTS.md
@@ -12,20 +12,14 @@
 #   create_file_data、update_file_data、file_data_to_string
 # 这样和 Agent 自己写入的格式完全一致。
 
-import os
 import hashlib
 import json
-from contextlib import contextmanager
 
 from deepagents.backends.utils import (
     create_file_data,
     file_data_to_string,
     update_file_data,
 )
-from langgraph.store.sqlite import SqliteStore
-
-from career_agent import config
-
 # Agent 眼里的记忆路径。注意 MEMORY_ROUTE 结尾的斜杠
 MEMORY_ROUTE = "/memories/"
 MEMORY_FILE_PATH = "/memories/AGENTS.md"
@@ -55,30 +49,11 @@ MEMORY_TEMPLATE = (
 )
 
 
-def get_db_path():
-    """返回记忆数据库文件的完整路径（以 deep_agent 工程根目录为基准）。"""
-    return str(config.PROJECT_DIR / config.MEMORY_DB_PATH)
+def create_memory_store(pool):
+    """通过应用连接池读写 LangGraph 长期记忆。"""
+    from langgraph.store.postgres import PostgresStore
 
-
-@contextmanager
-def open_store():
-    """打开记忆数据库。
-
-    用法：
-        with open_store() as store:
-            ...在这里使用 store...
-    with 块结束时，数据库连接会自动关闭。
-    """
-    db_path = get_db_path()
-
-    # 存放数据库的文件夹（默认是 data）不存在就先创建
-    folder = os.path.dirname(db_path)
-    os.makedirs(folder, exist_ok=True)
-
-    with SqliteStore.from_conn_string(db_path) as store:
-        # 第一次使用时建表；已经建过表再调用也没有影响
-        store.setup()
-        yield store
+    return PostgresStore(pool)
 
 
 def read_memory(store, user_id=None):

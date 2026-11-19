@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from dotenv import dotenv_values
+from psycopg.conninfo import make_conninfo
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
@@ -19,6 +20,21 @@ def _setting(name: str) -> str:
     if file_value is None:
         return ""
     return file_value.strip()
+
+
+def _app_db_dsn() -> str:
+    """优先使用应用专用连接串，也可使用同库的 PostgreSQL 参数。"""
+    conninfo = _setting("CAREER_APP_DB_DSN")
+    if conninfo:
+        return conninfo
+    options = {
+        "host": _setting("PGHOST"),
+        "port": _setting("PGPORT"),
+        "dbname": _setting("PGDATABASE"),
+        "user": _setting("PGUSER"),
+        "password": _setting("PGPASSWORD"),
+    }
+    return make_conninfo(**options) if all(options.values()) else ""
 
 # ---------------------------------------------------------------
 # 一、模型服务（必须改这两项）
@@ -67,18 +83,12 @@ USE_SKILLS = True
 SKILLS_DIR = APP_DIR / "skills"
 USE_MEMORY = True
 
-# 记忆数据库文件，相对于 deep_agent 文件夹。data 文件夹不存在会自动创建
-MEMORY_DB_PATH = "data/memory.db"
-
 # 记忆超过这么多字符时提醒整理（记忆每次请求都会整个放进系统提示）
 MEMORY_WARN_CHARS = 2000
 
 # ---------------------------------------------------------------
 # 四、会话
 # ---------------------------------------------------------------
-
-# 会话数据库文件，相对于 deep_agent 文件夹
-SESSION_DB_PATH = "data/sessions.db"
 
 # 模型服务的上下文长度，就是 vLLM 启动参数里的 max-model-len（输入加输出的总上限）
 MODEL_CONTEXT_TOKENS = 16384
@@ -96,8 +106,8 @@ FIX_STREAM_USAGE = True
 # 所以填上下文长度的一半，留足余量。运行时会显示每次请求的真实 token 数，可以据此调整
 MODEL_MAX_INPUT_TOKENS = 8192
 
-# 五、Web 身份验证
-AUTH_DB_PATH = "data/users.db"
+# 五、应用数据库与 Web 身份验证
+APP_DB_DSN = _app_db_dsn()
 AUTH_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 AUTH_COOKIE_NAME = "deep_agent_session"
 # 本机 HTTP 使用 False；HTTPS 部署时通过环境变量或 .env 设置为 true。
