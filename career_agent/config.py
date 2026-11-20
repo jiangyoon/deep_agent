@@ -66,7 +66,7 @@ TEMPERATURE = 0.2
 #   "low"     保留思考，但强度调到最低
 #   "off"     完全关闭思考
 # 关闭思考后速度会明显变快，但工具调用的准确率有没有下降，需要用真实问题测
-THINKING_MODE = "off"
+THINKING_MODE = "default"
 
 # 单次请求最长等待时间（秒）。本地大模型生成较慢，给宽松一点
 REQUEST_TIMEOUT = 300
@@ -90,8 +90,10 @@ MEMORY_WARN_CHARS = 2000
 # 四、会话
 # ---------------------------------------------------------------
 
-# 模型服务的上下文长度，就是 vLLM 启动参数里的 max-model-len（输入加输出的总上限）
-MODEL_CONTEXT_TOKENS = 16384
+# 模型服务的上下文长度（输入加输出的总上限），换模型时在 .env 配 DEEP_AGENT_MODEL_CONTEXT_TOKENS。
+# 默认值 1000000 是移动云 qwen/qwen3.6-plus 的规格（阿里云百炼 qwen3.6-plus 文档：
+# 上下文 1,000,000 tokens、最大输出 65,536、思考模式下最大输入 983,616）。
+MODEL_CONTEXT_TOKENS = int(_setting("DEEP_AGENT_MODEL_CONTEXT_TOKENS") or 1000000)
 
 # 是否修正流式输出时被夸大的 token 用量显示。
 # True ：用流式片段还原真实 input/output
@@ -99,12 +101,13 @@ MODEL_CONTEXT_TOKENS = 16384
 FIX_STREAM_USAGE = True
 
 # 告诉框架的"最大输入长度"。框架估算的 token 数达到它的 85% 时，会自动压缩对话。
-# 为什么不直接填 16384：
+# 为什么不直接填 MODEL_CONTEXT_TOKENS：
 #   1. 框架估算 token 的方法是"字符数除以 4"，实测对中文大约只算到真实值的一半，
-#      填满的话，等框架以为快满了，真实长度早就超过 16384 了
+#      填满的话，等框架以为快满了，真实长度早就超过上下文了
 #   2. 还要给模型的输出（思考加回答）留出空间
-# 所以填上下文长度的一半，留足余量。运行时会显示每次请求的真实 token 数，可以据此调整
-MODEL_MAX_INPUT_TOKENS = 8192
+# 所以默认取上下文长度的一半，留足余量；如需收紧（例如控制长会话成本），
+# 在 .env 配 DEEP_AGENT_MODEL_MAX_INPUT_TOKENS。运行时会显示每次请求的真实 token 数，可以据此调整
+MODEL_MAX_INPUT_TOKENS = int(_setting("DEEP_AGENT_MODEL_MAX_INPUT_TOKENS") or MODEL_CONTEXT_TOKENS // 2)
 
 # 五、应用数据库与 Web 身份验证
 APP_DB_DSN = _app_db_dsn()

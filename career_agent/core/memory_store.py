@@ -50,8 +50,15 @@ MEMORY_TEMPLATE = (
 
 
 def create_memory_store(pool):
-    """通过应用连接池读写 LangGraph 长期记忆。"""
-    from langgraph.store.postgres import PostgresStore
+    """通过应用连接池读写 LangGraph 长期记忆。
+
+    langgraph-store-postgres 0.1.0 起从命名空间包改成了顶层包，
+    两种安装形态都支持。
+    """
+    try:
+        from langgraph.store.postgres import PostgresStore
+    except ModuleNotFoundError:
+        from langgraph_store_postgres import PostgresStore
 
     return PostgresStore(pool)
 

@@ -14,6 +14,7 @@
 from langchain_deepseek import ChatDeepSeek
 
 from career_agent import config
+from career_agent.core.stream_usage import patch_stream_usage
 from career_agent.core.thinking_mode import get_extra_body
 
 # config.py 里的示例值里会出现这些文字，说明用户还没有改成真实值
@@ -64,9 +65,11 @@ def create_llm():
     if max_input_tokens is not None:
         profile = {"max_input_tokens": max_input_tokens}
 
+    # 兼容 .env 中填写完整的聊天接口。客户端会自行拼接 /chat/completions。
+    api_base = config.MODEL_BASE_URL.rstrip("/").removesuffix("/chat/completions")
     llm = ChatDeepSeek(
         model=config.MODEL_NAME,
-        api_base=config.MODEL_BASE_URL,
+        api_base=api_base,
         api_key=config.MODEL_API_KEY,
         temperature=config.TEMPERATURE,
         timeout=config.REQUEST_TIMEOUT,
@@ -77,4 +80,11 @@ def create_llm():
         # 最大输入长度
         profile=profile,
     )
+
+    # 在流式源头修正 usage，防止 chunk 合并相加导致持久化数字虚高。
+    # 算法实现与显示层兜底（web/usage_tracker.py 复用同一累加器）
+    # 都在 core/stream_usage.py，开关 config.FIX_STREAM_USAGE。
+    if getattr(config, "FIX_STREAM_USAGE", True):
+        patch_stream_usage(llm)
+
     return llm
