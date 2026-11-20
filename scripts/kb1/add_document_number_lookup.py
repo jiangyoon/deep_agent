@@ -4,8 +4,13 @@ import argparse
 import getpass
 import json
 import os
-import re
-import unicodedata
+import sys
+from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from career_agent.knowledge.document_number import is_candidate, normalize_reference, parse_reference
 
 
 DOCUMENT_NUMBERS = {
@@ -17,30 +22,6 @@ DOCUMENT_NUMBERS = {
 ALIASES = {"N003": ["移集成人〔2026〕182号"]}
 VALID_GRADES = {"S", "A", "A-", "B", "C"}
 GRADE_CONSTRAINT = "kb1_rewards_grade_check"
-REF = re.compile(r"(?P<issuer>[\u3400-\u9fff]*)(?:〔(?P<year>\d{4})〕|(?P<short_year>\d{4})年)?(?P<serial>\d{1,8})号")
-
-
-def normalize_reference(value):
-    value = "".join(unicodedata.normalize("NFKC", value).split())
-    return value.translate(str.maketrans({"[": "〔", "]": "〕", "(": "〔", ")": "〕"}))
-
-
-def parse_reference(value):
-    match = REF.fullmatch(normalize_reference(value))
-    if not match:
-        raise ValueError("请输入文号，例如 182号、人通〔2026〕182号、京人社12号")
-    return match["issuer"], match["year"] or match["short_year"], int(match["serial"])
-
-
-def is_candidate(reference, stored):
-    issuer, year, serial = reference
-    try:
-        stored_issuer, stored_year, stored_serial = parse_reference(stored)
-    except ValueError:
-        return False
-    return (serial == stored_serial
-            and (not year or year == stored_year)
-            and (not issuer or stored_issuer.startswith(issuer)))
 
 
 def resolve_document_number(db, text):
