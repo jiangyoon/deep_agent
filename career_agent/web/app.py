@@ -1,9 +1,14 @@
 """职业规划助手的 Web 入口。"""
 
 import logging
+import sys
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# 直接运行本文件时，解释器只把 career_agent/web 放入搜索路径。
+if __name__ == "__main__" and __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
@@ -25,7 +30,9 @@ from career_agent.core.session_store import (
     session_exists,
 )
 from career_agent.core.user_store import UserStore
+from career_agent.knowledge.tools import create_kb1_tools
 from career_agent.web.agent_stream import stream_answer
+from career_agent.web.chat_history import browser_message_count, browser_messages
 from career_agent.web.auth import current_user, require_same_origin, router as auth_router
 
 
@@ -40,6 +47,7 @@ async def lifespan(application: FastAPI):
     """Web 服务运行期间共享应用数据库连接池。"""
     with open_app_pool() as pool:
         application.state.user_store = UserStore(pool)
+        application.state.kb1_tools = create_kb1_tools(pool)
         # 同步执行链串行运行，避免生成与删除同一会话相互覆盖。
         application.state.session_run_lock = threading.Lock()
         application.state.memory_store = create_memory_store(pool)
@@ -100,6 +108,7 @@ def get_session_agent(request: Request):
             llm = create_llm()
             agent = build_agent(
                 llm,
+                tools=request.app.state.kb1_tools,
                 use_skills=config.USE_SKILLS,
                 use_memory=config.USE_MEMORY,
                 store=request.app.state.memory_store,
@@ -108,30 +117,6 @@ def get_session_agent(request: Request):
             )
             request.app.state.session_agent = agent
     return agent
-
-
-def message_role(message) -> str | None:
-    """把 LangChain 消息类型转换成前端角色。"""
-    message_type = getattr(message, "type", "")
-    if message_type == "human":
-        return "user"
-    if message_type == "ai":
-        return "agent"
-    return None
-
-
-def browser_messages(messages) -> list[dict[str, str]]:
-    """只返回浏览器需要展示的用户消息和有正文的 AI 消息。"""
-    result = []
-    for message in messages:
-        role = message_role(message)
-        if role is None:
-            continue
-        text = content_to_text(message.content).strip()
-        if text == "":
-            continue
-        result.append({"role": role, "content": text})
-    return result
 
 
 def session_context_usage(messages) -> dict:
@@ -164,7 +149,7 @@ def session_context_usage(messages) -> dict:
 def session_title(messages, session_id: str) -> str:
     """用第一条用户消息生成侧栏标题。"""
     for message in messages:
-        if message_role(message) != "user":
+        if message.type != "human" or message.additional_kwargs.get("lc_source") == "pinned_skill":
             continue
         text = " ".join(content_to_text(message.content).split())
         if text == "":
@@ -213,6 +198,31 @@ def shared_script() -> FileResponse:
     return view_file("shared.js")
 
 
+@app.get("/chat-activity.js", include_in_schema=False)
+def chat_activity_script() -> FileResponse:
+    return view_file("chat-activity.js")
+
+
+VENDOR_FILES = {
+    "vue.global.prod.js": "application/javascript",
+    "tailwind-browser.js": "application/javascript",
+}
+
+
+@app.get("/vendor/{name}", include_in_schema=False)
+def vendor_script(name: str) -> FileResponse:
+    """登录页和对话页共用的本地前端库，避免首屏依赖外部 CDN。"""
+    media_type = VENDOR_FILES.get(name)
+    path = VIEW_DIR / "vendor" / name
+    if media_type is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="没有这个文件")
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     """供浏览器和部署探针确认 Web 服务已启动。"""
@@ -240,6 +250,13 @@ def session_operation(request: Request):
         yield
     finally:
         lock.release()
+
+
+@app.get("/api/context-config")
+def get_context_config(user: dict = Depends(current_user)) -> dict:
+    """前端上下文仪表盘的分母（模型上下文窗口）统一下发，不在页面里写死。"""
+    limit = getattr(config, "MODEL_CONTEXT_TOKENS", 0) or 0
+    return {"limit_tokens": limit}
 
 
 @app.get("/api/memory")
@@ -293,7 +310,7 @@ def get_sessions(request: Request, user: dict = Depends(current_user)) -> list[S
         result.append(SessionResponse(
             id=session_id,
             title=session_title(messages, session_id) if messages else "新会话",
-            message_count=len(browser_messages(messages)),
+            message_count=browser_message_count(messages),
         ))
     return result
 
@@ -350,3 +367,9 @@ def session_chat_stream(
         owned_stream(), media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)

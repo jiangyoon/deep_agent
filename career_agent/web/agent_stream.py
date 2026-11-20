@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessageChunk
 
 from career_agent import config
 from career_agent.core.messages import content_to_text
+from career_agent.web.chat_history import tool_call_data, tool_result_data
 from career_agent.web.usage_tracker import StreamUsageTracker
 
 
@@ -105,14 +106,7 @@ def stream_answer(agent, question: str, run_config=None, context=None):
                     if node_name == "model":
                         for message in message_list(data):
                             for call in getattr(message, "tool_calls", []):
-                                yield sse_event(
-                                    "tool_call",
-                                    {
-                                        "id": call.get("id", ""),
-                                        "name": call.get("name", ""),
-                                        "args": call.get("args", {}),
-                                    },
-                                )
+                                yield sse_event("tool_call", tool_call_data(call))
 
                             usage = usage_tracker.get_usage()
                             if usage is None:
@@ -132,21 +126,7 @@ def stream_answer(agent, question: str, run_config=None, context=None):
 
                     elif node_name == "tools":
                         for message in message_list(data):
-                            result_text = content_to_text(message.content)
-                            if len(result_text) > 500:
-                                result_text = result_text[:500] + "..."
-                            yield sse_event(
-                                "tool_result",
-                                {
-                                    "id": getattr(
-                                        message,
-                                        "tool_call_id",
-                                        "",
-                                    ),
-                                    "name": getattr(message, "name", ""),
-                                    "result": result_text,
-                                },
-                            )
+                            yield sse_event("tool_result", tool_result_data(message))
 
         if not text_emitted:
             raise RuntimeError("Agent 没有返回回答正文")
