@@ -8,6 +8,7 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from career_agent import config
+from career_agent.agent.ask_user import ask_user, has_tool_clarification, reject_empty_ask_answer
 from career_agent.core.backend_builder import SKILLS_ROUTE, build_backend, build_permissions
 from career_agent.core.memory_store import MEMORY_FILE_PATH
 
@@ -53,6 +54,19 @@ def consultation_context(request: ModelRequest) -> SystemMessage:
         if skill_file.name == "SKILL.md" and skill_file.is_relative_to(config.SKILLS_DIR) and skill_file.is_file():
             body = skill_file.read_text(encoding="utf-8")
             blocks.append({"type": "text", "text": f"已读取的技能，仅在适用时执行。\n{body}"})
+    ask_available = any(getattr(tool, "name", None) == ask_user.name for tool in request.tools)
+    if ask_available and has_tool_clarification(request.messages):
+        blocks.append({
+            "type": "text",
+            "text": (
+                "刚返回的工具结果含有 clarification，表示有字段待确认。"
+                "先用员工已经明确给出的信息消歧或补参，已有确认值时直接继续处理。"
+                "如果仍缺会影响当前答复的信息，下一步调用 ask_user，传入该项的 question，"
+                "有 options 时原样传入选项（保留 label 和 value），没有 options 时用文本输入。"
+                "一次只确认一个字段，恢复后把提交值用于 clarification.field 对应的后续处理。"
+                "员工本轮已跳过该项或明确不确定时，说明资料缺口。"
+            ),
+        })
     return SystemMessage(content=blocks)
 
 
@@ -89,11 +103,15 @@ def build_agent(llm, tools=None, use_skills=None, use_memory=False, store=None,
         # 告诉框架：每次运行开始时，把这个文件的内容放进系统提示
         memory = [MEMORY_FILE_PATH]
 
+    middleware = [consultation_context]
+    if isinstance(tools, (list, tuple)) and ask_user in tools:
+        middleware.append(reject_empty_ask_answer)
+
     agent = create_deep_agent(
         model=llm,
         tools=tools,
         system_prompt=SYSTEM_PROMPT + (SKILL_INSTRUCTIONS if use_skills else ""),
-        middleware=[consultation_context],
+        middleware=middleware,
         backend=backend,
         skills=skills,
         permissions=permissions,

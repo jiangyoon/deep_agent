@@ -16,6 +16,7 @@ source_id，供模型继续调 search_policy_sections 查条款。
 
 from langchain_core.tools import tool
 
+from career_agent.agent.ask_user import AskOption, ToolClarification
 from career_agent.knowledge.document_number import is_candidate, normalize_reference, parse_reference
 from career_agent.knowledge.notice_attachments import related_bodies
 from career_agent.knowledge.pg_lookup import REVIEWED_FILE, Keyword, Year, handle_db_errors, read_snapshot
@@ -73,7 +74,22 @@ def create_policy_document_tool(pool):
         with read_snapshot(pool) as db:
             rows = _find_documents(db, query, year, organization)
             if len(rows) > 1:
-                return {"status": "ambiguous", "results": rows}
+                options = []
+                for row in rows:
+                    title, doc_no = row["source_title"], row["doc_no"]
+                    details = [title, row["organization"], str(row["applicable_year"] or "")]
+                    if doc_no and doc_no not in title:
+                        details.append(doc_no)
+                    options.append(AskOption(label=" · ".join(filter(None, details)), value=row["source_id"]))
+                clarification = ToolClarification(
+                    tool="ask_user", field="source_id", question="请选择你要查的文件。", options=options,
+                )
+                return {
+                    "status": "ambiguous",
+                    "results": rows,
+                    "message": "已有年份或发文单位时先缩小范围。仍有多份时请员工选定文件。",
+                    "clarification": clarification.model_dump(exclude_none=True),
+                }
             if not rows:
                 return {"status": "no_match", "results": []}
             rows[0]["related_bodies"] = related_bodies(db, rows[0]["source_id"])

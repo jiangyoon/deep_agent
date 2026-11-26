@@ -32,6 +32,8 @@
     .md-answer ol { list-style: decimal; }
     .md-answer li { margin: 0.2em 0; }
     .md-answer a { color: #6d28d9; text-decoration: underline; }
+    /* 奖励目录中「蓝色字体证书」（考过后可视同职称）在答案里同样标蓝 */
+    .md-answer .blue-cert { color: #1d4ed8; font-weight: 500; cursor: help; }
     .md-answer code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; background: #f3f4f6; padding: 0.1em 0.35em; border-radius: 0.35rem; }
     .md-answer pre { margin: 0.8em 0; background: #111827; color: #f9fafb; padding: 0.9em 1em; border-radius: 0.75rem; overflow-x: auto; }
     .md-answer pre code { background: transparent; color: inherit; padding: 0; }
@@ -48,6 +50,14 @@
     .activity-detail { border-top: 1px solid #e5e7eb; max-height: 15rem; overflow: auto; overscroll-behavior: contain; padding: .7rem .85rem; font-size: .85rem; line-height: 1.6; color: #475569; overflow-wrap: anywhere; }
     .activity-detail pre { white-space: pre-wrap; margin: .35rem 0; }
     .thought-detail { height: min(160px, 25vh); }
+    /* ask 确认卡片：从输入框上方中线向上划出 / 向下收起（docs/ask.html 原型） */
+    .ask-card-enter-active, .ask-card-leave-active { transform-origin: bottom center; transition: transform .38s cubic-bezier(0.22, 1, 0.36, 1), opacity .3s ease; }
+    .ask-card-enter-from, .ask-card-leave-to { transform: translateY(24px) scale(0.96); opacity: 0; }
+    @keyframes pulse-gentle {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-2px); }
+    }
+    .ask-handle-hint:hover .ask-handle-chevron { animation: pulse-gentle 1.2s infinite ease-in-out; }
   </style>
 </head>
 <body class="bg-gray-50 text-gray-900 font-sans">
@@ -102,6 +112,12 @@
         const sessionError = ref('');
         const inputValue = ref('');
         const isGenerating = ref(false);
+        const pendingAsk = ref(null);
+        const canContinueAsk = ref(false);
+        const askNeedsSync = ref(false);
+        const askDrawerOpen = ref(false);
+        const askValue = ref('');
+        const askError = ref('');
         const textareaRef = ref(null);
         const messagesEndRef = ref(null);
         // 真正滚动的是这个 overflow 容器，不是整页 window
@@ -192,6 +208,31 @@
             lastScrollTop = el.scrollTop;
           });
         }
+        // 输入框上方的统一状态条：把「已停止生成 / 重新加载 / 继续生成 / 回到最新」
+        // 合并成一条胶囊，顺序固定为「状态 → 续跑操作 → 回到最新」。
+        // 相邻项之间由模板画竖分隔线；没有任何内容时整条不渲染，不占高度。
+        const statusBarItems = computed(function () {
+          const items = [];
+          // 状态段：停止生成（琥珀点）或接口报错（玫红点），只显示、不可点
+          if (askError.value && !pendingAsk.value) {
+            items.push({
+              key: 'status',
+              label: askError.value,
+              tone: askError.value.startsWith('已停止生成') ? 'stopped' : 'error',
+            });
+          }
+          // 续跑操作：两者互斥，与原来 v-if / v-else-if 的口径一致
+          if (!isGenerating.value && askNeedsSync.value) {
+            items.push({ key: 'reload', label: '重新加载', icon: 'reload', emphasis: 'primary', onClick: retryAskSync });
+          } else if (!isGenerating.value && canContinueAsk.value) {
+            items.push({ key: 'continue', label: '继续生成', icon: 'play', emphasis: 'primary', onClick: continueAsk });
+          }
+          // 滚动离开底部时的回到底部入口（次要操作：深灰文字 + 紫色箭头）
+          if (!following.value && messages.value.length) {
+            items.push({ key: 'latest', label: '回到最新', icon: 'down', emphasis: 'muted', onClick: goLatest });
+          }
+          return items;
+        });
 
         function handleInput() {
           nextTick(function () {
@@ -226,7 +267,167 @@
           return DOMPurify.sanitize(marked.parse(content, { gfm: true }));
         }
 
+        // —— 奖励目录蓝色字体证书的确定性标蓝 ——
+        // 数据源：后端在奖励工具的 tool_result 事件上独立下发 blueNames（对
+        // 完整结果提取，不受展示截断影响）。这里不依赖模型是否原样念出名称：
+        // 渲染时对 HTML 的文本节点按「长名优先」占位替换，包成 span.blue-cert。
+        // 匹配放宽全半角：目录里「咨询工程师（投资）」是全角括号，模型答案
+        // 可能写半角（反之亦然）；空白折叠，覆盖全角空格等写法差异。
+        function blueNamePattern(name) {
+          let source = '';
+          for (const ch of name) {
+            if (ch === '(' || ch === '（') source += '[((\uFF08]';
+            else if (ch === ')' || ch === '）') source += '[))\uFF09]';
+            else if (/\s/.test(ch)) source += '\\s+';
+            else source += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          }
+          return new RegExp(source, 'g');
+        }
+
+        function applyBlueNames(html, names) {
+          if (!names || !names.length) return html;
+          const template = document.createElement('template');
+          template.innerHTML = html;
+          const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+          const nodes = [];
+          while (walker.nextNode()) nodes.push(walker.currentNode);
+          const ordered = [];
+          for (const name of new Set(names)) {
+            if (name && !ordered.includes(name)) ordered.push(name);
+          }
+          ordered.sort(function (a, b) { return b.length - a.length; });
+          for (const node of nodes) {
+            const text = node.nodeValue;
+            if (!text) continue;
+            const parts = [];
+            let replaced = text;
+            for (const name of ordered) {
+              const matched = [];
+              const swapped = replaced.replace(blueNamePattern(name), function (m) {
+                matched.push(m);
+                return '\u0001' + (parts.length + matched.length - 1) + '\u0001';
+              });
+              if (swapped !== replaced) {
+                parts.push.apply(parts, matched);
+                replaced = swapped;
+              }
+            }
+            if (replaced === text) continue;
+            const fragment = document.createDocumentFragment();
+            replaced.split(/(\u0001\d+\u0001)/).forEach(function (piece) {
+              const match = /^\u0001(\d+)\u0001$/.exec(piece);
+              if (match) {
+                const span = document.createElement('span');
+                span.className = 'blue-cert';
+                span.textContent = parts[Number(match[1])];
+                span.title = '目录中该证书名称为蓝色字体：考过后可视同为相应级别的职称证书';
+                fragment.appendChild(span);
+              } else if (piece) {
+                fragment.appendChild(document.createTextNode(piece));
+              }
+            });
+            node.parentNode.replaceChild(fragment, node);
+          }
+          return template.innerHTML;
+        }
+
+        // 模型常把附件地址以裸文本放进答案（无协议头，markdown 不会自动
+        // 转链）。这里兜底：把 /api/attachments/{id}/download 模式统一转成
+        // 可点击的下载链接，员工在任何写法下都能点。已存在的链接（markdown
+        // 生成的 <a>）不再二次包裹，避免嵌套 <a> 被浏览器拆开。
+        function linkifyAttachments(html) {
+          if (html.indexOf('/api/attachments/') === -1) return html;
+          const template = document.createElement('template');
+          template.innerHTML = html;
+          const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+          const nodes = [];
+          while (walker.nextNode()) {
+            if (walker.currentNode.parentElement &&
+                walker.currentNode.parentElement.closest('a')) continue;
+            nodes.push(walker.currentNode);
+          }
+          const pattern = /\/api\/attachments\/([A-Za-z0-9_-]+)\/download/g;
+          for (const node of nodes) {
+            const text = node.nodeValue;
+            if (!text || text.indexOf('/api/attachments/') === -1) continue;
+            const fragment = document.createDocumentFragment();
+            let last = 0;
+            let match;
+            pattern.lastIndex = 0;
+            while ((match = pattern.exec(text)) !== null) {
+              if (match.index > last) {
+                fragment.appendChild(document.createTextNode(text.slice(last, match.index)));
+              }
+              const link = document.createElement('a');
+              link.href = match[0];
+              link.title = match[0];
+              link.textContent = '点击下载';
+              fragment.appendChild(link);
+              last = match.index + match[0].length;
+            }
+            if (last < text.length) {
+              fragment.appendChild(document.createTextNode(text.slice(last)));
+            }
+            if (fragment.childNodes.length) node.parentNode.replaceChild(fragment, node);
+          }
+          return template.innerHTML;
+        }
+
+        function renderAnswer(content, blueNames) {
+          return applyBlueNames(linkifyAttachments(renderMarkdown(content)), blueNames);
+        }
+
+        // 直播/回放共用：从 tool_result 事件里累积奖励工具的蓝色名单。
+        // 模型答案常用简称（「一级建造师」），而目录蓝名原文是全称
+        // （「一级建造师注册证书」）；「注册证书/注册证」后缀剥离出的
+        // 简称一并匹配，渲染时长名优先不会被简称抢先。
+        function collectBlueNames(events, existing) {
+          const names = existing ? existing.slice() : [];
+          for (const event of events || []) {
+            for (const name of (event.data && event.data.blueNames) || []) {
+              if (!name) continue;
+              if (!names.includes(name)) names.push(name);
+              for (const suffix of ['注册证书', '注册证']) {
+                if (name.length > suffix.length + 2 && name.endsWith(suffix)) {
+                  const short = name.slice(0, -suffix.length);
+                  if (short && !names.includes(short)) names.push(short);
+                  break;
+                }
+              }
+            }
+          }
+          return names;
+        }
+
         let activeRequest = null;
+        let sessionLoad = 0;
+
+        function rememberSession(id) {
+          currentSessionId.value = id;
+          const key = 'career-chat-session:' + currentUser.value?.username;
+          if (id) sessionStorage.setItem(key, id);
+          else sessionStorage.removeItem(key);
+        }
+
+        function setPendingAsk(ask) {
+          if (pendingAsk.value?.id !== ask?.id) askValue.value = '';
+          pendingAsk.value = ask;
+          askError.value = '';
+          if (!ask) askDrawerOpen.value = false;
+        }
+
+        function showAsk() {
+          askDrawerOpen.value = true;
+        }
+
+        function closeAsk() {
+          askDrawerOpen.value = false;
+        }
+
+        // 抽屉没有 <dialog> 的 cancel（Esc）事件，这里全局补上：Esc 收起抽屉
+        function onAskKeydown(event) {
+          if (event.key === 'Escape' && askDrawerOpen.value) closeAsk();
+        }
 
         async function responseJson(response) {
           const data = await response.json();
@@ -247,6 +448,7 @@
         }
 
         async function newSession() {
+          const load = ++sessionLoad;
           if (activeRequest) {
             activeRequest.abort();
           }
@@ -256,8 +458,12 @@
               method: 'POST',
             });
             const session = await responseJson(response);
-            currentSessionId.value = session.id;
+            if (load !== sessionLoad) return null;
+            rememberSession(session.id);
             messages.value = [];
+            setPendingAsk(null);
+            canContinueAsk.value = false;
+            askNeedsSync.value = false;
             resetContextUsage();
             isGenerating.value = false;
             sessionError.value = '';
@@ -269,6 +475,7 @@
         }
 
         async function openSession(sessionId) {
+          const load = ++sessionLoad;
           if (activeRequest) {
             activeRequest.abort();
           }
@@ -278,26 +485,73 @@
               '/api/sessions/' + encodeURIComponent(sessionId)
             );
             const session = await responseJson(response);
-            messages.value = session.messages.map(function (message, index) {
-              return {
-                id: 'history-' + index,
-                role: message.role,
-                content: message.content,
-                blocks: replayBlocks(message),
-              };
-            });
-            currentSessionId.value = session.id;
-            contextUsage.value = session.context_usage || {
-              used_tokens: 0,
-              limit_tokens: knownLimitTokens.value,
-              percent: 0,
-            };
+            if (load !== sessionLoad) return false;
+            applySession(session);
             isGenerating.value = false;
             sessionError.value = '';
-            // 进入已有会话：立刻滚到最新消息，不要停在顶部
             goLatest();
+            return true;
           } catch (error) {
-            sessionError.value = '会话加载失败：' + error.message;
+            if (load === sessionLoad) sessionError.value = '会话加载失败：' + error.message;
+            return false;
+          }
+        }
+
+        function applySession(session) {
+          messages.value = session.messages.map((message, index) => ({
+            id: 'history-' + index,
+            role: message.role,
+            content: message.content,
+            blocks: replayBlocks(message),
+            blueNames: collectBlueNames(message.events || []),
+          }));
+          rememberSession(session.id);
+          setPendingAsk(session.pending_ask || null);
+          canContinueAsk.value = Boolean(session.can_continue_ask);
+          askNeedsSync.value = Boolean(session.ask_in_progress);
+          const last = messages.value.at(-1);
+          if (pendingAsk.value && last?.role === 'agent') {
+            applyChatEvent(last.blocks, { name: 'ask_user', data: pendingAsk.value });
+          }
+          contextUsage.value = session.context_usage || {
+            used_tokens: 0,
+            limit_tokens: knownLimitTokens.value,
+            percent: 0,
+          };
+        }
+
+        async function recoverAsk(sessionId, load, resuming) {
+          const url = '/api/sessions/' + encodeURIComponent(sessionId) + '?settled=true';
+          for (const delay of [0, 250, 750]) {
+            if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+            if (load !== sessionLoad) return false;
+            try {
+              const response = await apiFetch(url);
+              if (response.status === 409) continue;
+              const session = await responseJson(response);
+              if (load !== sessionLoad) return false;
+              askNeedsSync.value = false;
+              if (resuming || session.pending_ask || session.can_continue_ask) {
+                applySession(session);
+                return true;
+              }
+              return false;
+            } catch {
+              // 连接未恢复时，保留本地显示，等下一次尝试。
+            }
+          }
+          if (load === sessionLoad) askNeedsSync.value = true;
+          return false;
+        }
+
+        async function retryAskSync() {
+          if (isGenerating.value) return;
+          const load = sessionLoad;
+          isGenerating.value = true;
+          try {
+            await recoverAsk(currentSessionId.value, load, true);
+          } finally {
+            if (load === sessionLoad) isGenerating.value = false;
           }
         }
 
@@ -316,8 +570,11 @@
             }
 
             if (currentSessionId.value === sessionId) {
-              currentSessionId.value = null;
+              rememberSession(null);
               messages.value = [];
+              setPendingAsk(null);
+              canContinueAsk.value = false;
+              askNeedsSync.value = false;
               resetContextUsage();
             }
             await loadSessions();
@@ -356,8 +613,7 @@
         // 再请求 /api/chat/stream，按 SSE 事件把回答一点点拼上去。
         async function handleSend() {
           const text = inputValue.value.trim();
-          // 空内容，或上一轮还在生成时，直接忽略
-          if (!text || isGenerating.value) return;
+          if (!text || isGenerating.value || pendingAsk.value || canContinueAsk.value || askNeedsSync.value) return;
 
           let sessionId = currentSessionId.value;
           if (!sessionId) {
@@ -377,41 +633,63 @@
             },
           ]);
           inputValue.value = '';
-          isGenerating.value = true;
           goLatest();
           // 发送后把输入框高度收回去
           if (textareaRef.value) {
             textareaRef.value.style.height = 'auto';
           }
 
-          // AbortController 给"停止生成"用：点停止就 abort 这次 fetch
+          await runStream(sessionId, requestId + 1, '/stream', { question: text });
+        }
+
+        async function submitAsk(skip) {
+          const ask = pendingAsk.value;
+          const message = messages.value.at(-1);
+          const value = askValue.value.trim();
+          if (!ask || !message || isGenerating.value || askNeedsSync.value || (!skip && !value)) return;
+          closeAsk(); // 先收起卡片，方便看到续跑的流式过程；下一个 ask_user 会再次划出
+          const reply = skip ? { status: 'skipped' } : { status: 'answered', value };
+          await runStream(currentSessionId.value, message.id, '/resume', { interrupt_id: ask.id, reply });
+        }
+
+        // 选项卡片点击即提交（与原型推荐问法一致），内部复用 submitAsk 的全部校验
+        async function submitAskOption(value) {
+          askValue.value = value;
+          await submitAsk(false);
+        }
+
+        async function continueAsk() {
+          const message = messages.value.at(-1);
+          if (!message || !canContinueAsk.value || isGenerating.value || askNeedsSync.value) return;
+          await runStream(currentSessionId.value, message.id, '/resume', null);
+        }
+
+        async function runStream(sessionId, messageId, path, body) {
+          const resuming = path === '/resume';
+          const agentMessage = messages.value.find(msg => msg.id === messageId);
+          const load = sessionLoad;
           const controller = new AbortController();
           activeRequest = controller;
+          isGenerating.value = true;
+          askError.value = '';
 
           try {
-            // 会话编号放进 URL；后端会把本轮消息写入对应检查点
             const response = await apiFetch(
-              '/api/sessions/'
-                + encodeURIComponent(sessionId)
-                + '/stream',
+              '/api/sessions/' + encodeURIComponent(sessionId) + path,
               {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ question: text }),
-              signal: controller.signal,
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                signal: controller.signal,
               }
             );
 
             // HTTP 层失败（4xx/5xx）：尽量读出 FastAPI 返回的 detail
             if (!response.ok) {
               const data = await response.json();
-              throw new Error(data.detail || '请求失败');
+              throw new Error(typeof data.detail === 'string' ? data.detail : '提交内容无效');
             }
 
-            // 找到刚才预置的那条空 Agent 消息，后面往它的 content 上追加
-            const agentMessage = messages.value.find(function (msg) {
-              return msg.id === requestId + 1;
-            });
             if (!response.body) {
               throw new Error('浏览器无法读取流式响应');
             }
@@ -421,10 +699,11 @@
             const reader = response.body.getReader();
             const decoder = new TextDecoder('utf-8');
             let buffer = '';
-            let streamFinished = false;
+            let terminalEvent = null;
 
-            while (!streamFinished) {
+            while (true) {
               const result = await reader.read();
+              if (load !== sessionLoad) return;
               // stream: true 表示后面可能还有字节，避免把多字节汉字截断
               buffer += decoder.decode(result.value || new Uint8Array(), {
                 stream: !result.done,
@@ -439,6 +718,13 @@
 
                 if (event && agentMessage && ['reasoning_delta', 'answer_delta', 'tool_call', 'tool_result'].includes(event.name)) {
                   applyChatEvent(agentMessage.blocks, event, Date.now());
+                  if (event.name === 'tool_result' && event.data && event.data.blueNames) {
+                    agentMessage.blueNames = collectBlueNames([event], agentMessage.blueNames);
+                  }
+                  if (event.name === 'tool_result' && event.data.askReply &&
+                      event.data.id === pendingAsk.value?.tool_call_id) {
+                    setPendingAsk(null);
+                  }
                   followOutput();
                 } else if (event && event.name === 'usage' && agentMessage) {
                   const inputTokens = Number(event.data.input_tokens || 0);
@@ -462,27 +748,36 @@
                   };
                 } else if (event && event.name === 'error') {
                   throw new Error(event.data.message || '流式请求失败');
-                } else if (event && event.name === 'done') {
-                  if (agentMessage) finishChatBlocks(agentMessage.blocks, 'done');
-                  followOutput();
-                  streamFinished = true;
-                  break;
+                } else if (event && ['ask_user', 'done'].includes(event.name)) {
+                  terminalEvent = event;
                 }
 
                 separatorIndex = buffer.indexOf('\n\n');
               }
 
-              // 底层流已关闭（即使没收到 done 也要退出循环）
-              if (result.done && !streamFinished) {
-                throw new Error('连接已断开');
-              }
+              if (result.done) break;
             }
+
+            if (!terminalEvent) throw new Error('连接已断开');
+            canContinueAsk.value = false;
+            if (terminalEvent.name === 'ask_user') {
+              applyChatEvent(agentMessage.blocks, terminalEvent);
+              setPendingAsk(terminalEvent.data);
+              showAsk();
+            } else {
+              setPendingAsk(null);
+              finishChatBlocks(agentMessage.blocks, 'done');
+            }
+            followOutput();
           } catch (error) {
-            // 失败或用户点了停止：在 Agent 气泡里补一句说明
-            const agentMessage = messages.value.find(function (msg) {
-              return msg.id === requestId + 1;
-            });
-            if (agentMessage) {
+            if (load !== sessionLoad) return;
+            controller.abort();
+            const restored = await recoverAsk(sessionId, load, resuming);
+            if (load !== sessionLoad) return;
+            if (resuming) {
+              askError.value = error.name === 'AbortError' ? '已停止生成。' : error.message;
+              if (pendingAsk.value) showAsk(); // 提交失败时重新划出卡片展示错误，可重试
+            } else if (!restored && agentMessage) {
               finishChatBlocks(agentMessage.blocks, error.name === 'AbortError' ? 'interrupted' : 'error');
               const message = error.name === 'AbortError'
                 ? '已停止生成。'
@@ -615,6 +910,8 @@
             const response = await apiFetch('/api/auth/me');
             currentUser.value = await responseJson(response);
             await loadSessions();
+            const previousSession = sessionStorage.getItem('career-chat-session:' + currentUser.value.username);
+            if (sessions.value.some(chat => chat.id === previousSession)) await openSession(previousSession);
             // 模型上下文窗口由后端统一下发；失败不阻塞页面，只是仪表盘显示"未配置"
             try {
               const configResponse = await apiFetch('/api/context-config');
@@ -634,12 +931,15 @@
         async function handleLogout() {
           if (isLoggingOut.value) return;
           isLoggingOut.value = true;
+          sessionLoad += 1;
           if (activeRequest) activeRequest.abort();
           try {
             const response = await apiFetch('/api/auth/logout', { method: 'POST' });
             if (!response.ok) throw new Error('退出失败，请稍后重试');
             messages.value = [];
             sessions.value = [];
+            rememberSession(null);
+            setPendingAsk(null);
             currentUser.value = null;
             redirectToLogin(false);
           } catch (error) {
@@ -649,6 +949,9 @@
           }
         }
 
+        onMounted(function () {
+          window.addEventListener('keydown', onAskKeydown);
+        });
         onMounted(initialize);
 
         return {
@@ -683,9 +986,22 @@
           sessionError,
           inputValue,
           isGenerating,
+          pendingAsk,
+          canContinueAsk,
+          askNeedsSync,
+          retryAskSync,
+          askDrawerOpen,
+          askValue,
+          askError,
+          showAsk,
+          closeAsk,
+          submitAsk,
+          submitAskOption,
+          continueAsk,
           textareaRef,
           messagesEndRef,
           messagesScrollRef, following, goLatest, onMessageScroll, onMessageWheel, inspectStep,
+          statusBarItems,
           lastMessageId,
           handleInput,
           handleKeyDown,
@@ -696,6 +1012,7 @@
           removeSession,
           markdownReady,
           renderMarkdown,
+          renderAnswer,
           compactTokens,
         };
       },
@@ -864,10 +1181,12 @@
                       <agent-blocks
                         v-if="msg.role === 'agent' && msg.blocks && (msg.blocks.length || (isGenerating && msg.id === lastMessageId))"
                         @inspect="inspectStep"
+                        @open-ask="showAsk"
                         :blocks="msg.blocks"
                         :is-generating="isGenerating && msg.id === lastMessageId"
-                        :render-markdown="renderMarkdown"
+                        :render-answer="renderAnswer"
                         :markdown-ready="markdownReady"
+                        :blue-names="msg.blueNames"
                       />
 
                       <!-- 无过程数据的消息（用户消息 / 历史会话回放）：单气泡 -->
@@ -882,7 +1201,7 @@
                         <div
                           v-if="msg.role === 'agent' && markdownReady"
                           class="md-answer leading-relaxed text-[15px]"
-                          v-html="renderMarkdown(msg.content)"
+                          v-html="renderAnswer(msg.content, msg.blueNames)"
                         ></div>
                         <div v-else class="whitespace-pre-wrap leading-relaxed text-[15px]">{{ msg.content }}</div>
                       </div>
@@ -893,22 +1212,121 @@
               </div>
             </div>
 
-            <div v-if="!following && messages.length" class="relative z-10">
-              <button type="button" @click="goLatest" class="absolute bottom-2 left-1/2 -translate-x-1/2 bg-white shadow-md rounded-full border border-gray-200 px-4 py-1.5 text-sm text-violet-700">↓ 回到最新</button>
+            <!-- 分割线上方：统一状态条 / ask 确认卡片（随内容塌陷，不占输入区） -->
+            <div class="flex-shrink-0 w-full bg-gray-50 px-4 pt-3 pb-0">
+              <div class="max-w-4xl mx-auto relative flex flex-col items-center">
+                <!-- 统一状态条：状态点 + 竖分隔线 + 可点击操作（设计稿的胶囊形态） -->
+                <div
+                  v-if="statusBarItems.length"
+                  class="mb-2 inline-flex max-w-full items-center rounded-full border border-gray-200/80 bg-white px-1 py-0.5 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_4px_14px_-6px_rgba(15,23,42,0.16)]"
+                >
+                  <template v-for="(item, index) in statusBarItems" :key="item.key">
+                    <span v-if="index > 0" aria-hidden="true" class="mx-0.5 h-3.5 w-px shrink-0 bg-gray-200"></span>
+                    <!-- 状态段：只读，圆点按语义着色 -->
+                    <span
+                      v-if="!item.onClick"
+                      role="alert"
+                      class="flex min-w-0 items-center gap-1.5 px-2.5 py-1 text-[13px] leading-none text-gray-600"
+                    >
+                      <span
+                        aria-hidden="true"
+                        class="h-1.5 w-1.5 shrink-0 rounded-full"
+                        :class="item.tone === 'stopped' ? 'bg-amber-500' : 'bg-rose-500'"
+                      ></span>
+                      <span class="truncate">{{ item.label }}</span>
+                    </span>
+                    <!-- 操作段：可点击，紫色文字 + 图标 -->
+                    <button
+                      v-else
+                      type="button"
+                      @click="item.onClick"
+                      class="flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[13px] font-medium leading-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"
+                      :class="item.emphasis === 'primary'
+                        ? 'text-violet-700 hover:bg-violet-50'
+                        : 'text-gray-700 hover:bg-gray-100'"
+                    >
+                      <svg v-if="item.icon === 'reload'" aria-hidden="true" class="h-3.5 w-3.5 text-violet-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6" />
+                        <path d="M20.5 4v6h-6" />
+                      </svg>
+                      <svg v-else-if="item.icon === 'down'" aria-hidden="true" class="h-3.5 w-3.5 text-violet-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 5v14" />
+                        <path d="M19 12l-7 7-7-7" />
+                      </svg>
+                      <svg v-else aria-hidden="true" class="h-3.5 w-3.5 text-violet-500" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M8 5.14v13.72L19 12z" />
+                      </svg>
+                      <span class="whitespace-nowrap">{{ item.label }}</span>
+                    </button>
+                  </template>
+                </div>
+
+                <!-- Agent 向你确认（ask）：悬浮层，从输入框上方向上划出，遮挡在上层、不推挤下方布局 -->
+                <transition name="ask-card">
+                  <div v-if="pendingAsk && askDrawerOpen" role="region" aria-labelledby="ask-title"
+                       class="absolute left-0 right-0 bottom-full z-30 mb-2 max-h-[min(60vh,26rem)] overflow-y-auto overscroll-contain rounded-2xl bg-gradient-to-b from-[#f5f3ff]/95 via-white/95 to-white/95 backdrop-blur-xl border border-violet-200/70 shadow-[0_12px_36px_-8px_rgba(99,51,234,0.14),0_4px_12px_-2px_rgba(15,23,42,0.05)] p-4 sm:p-5 relative">
+                    <!-- 卡片头部：AI 星芒图标 + 标题 + 暂不回答 + 收起 -->
+                    <div class="flex items-center justify-between mb-3">
+                      <div class="flex items-center gap-2">
+                        <div class="w-7 h-7 rounded-lg bg-gradient-to-tr from-[#6333ea] to-[#34d399] p-[1px] shadow-sm shrink-0">
+                          <div class="w-full h-full bg-white rounded-[7px] flex items-center justify-center">
+                            <svg class="w-4 h-4 text-[#6333ea]" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L14.4 9.6L22 12L14.4 14.4L12 22L9.6 14.4L2 12L9.6 9.6L12 2Z"/></svg>
+                          </div>
+                        </div>
+                        <span class="text-sm font-semibold text-gray-800 tracking-tight">Agent 想向你确认</span>
+                        <span class="hidden sm:inline-block text-[11px] px-2 py-0.5 rounded-full bg-violet-100/70 text-violet-700 font-medium">回答后继续</span>
+                      </div>
+                      <div class="flex items-center gap-1.5">
+                        <button type="button" @click="submitAsk(true)" :disabled="isGenerating || askNeedsSync"
+                                class="text-xs text-gray-400 hover:text-violet-600 px-2 py-1 rounded-lg hover:bg-violet-50/70 transition disabled:opacity-40">暂不回答</button>
+                        <button type="button" @click="closeAsk" title="向下收起卡片"
+                                class="w-7 h-7 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100/80 flex items-center justify-center transition">
+                          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                        </button>
+                      </div>
+                    </div>
+                    <h2 id="ask-title" class="mb-3.5 text-sm sm:text-[15px] font-semibold text-gray-900 whitespace-pre-wrap break-words">{{ pendingAsk.question }}</h2>
+                    <!-- 选项：网格卡片，点击即提交（同原型推荐问法交互） -->
+                    <fieldset v-if="pendingAsk.options.length" :disabled="isGenerating || askNeedsSync" aria-labelledby="ask-title"
+                              class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <button v-for="option in pendingAsk.options" :key="option.value" type="button" @click="submitAskOption(option.value)"
+                              :disabled="isGenerating || askNeedsSync"
+                              class="group flex items-center gap-3 p-3 rounded-xl bg-white/90 hover:bg-violet-50/70 border border-gray-200/80 hover:border-violet-300 hover:shadow-sm transition-all text-left active:scale-[0.99] disabled:opacity-40">
+                        <span class="min-w-0 flex-1 text-xs sm:text-[13px] font-medium text-gray-700 group-hover:text-violet-900 leading-snug break-words">{{ option.label }}</span>
+                        <svg class="w-3.5 h-3.5 text-gray-300 group-hover:text-violet-500 group-hover:translate-x-0.5 transition-all shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+                      </button>
+                    </fieldset>
+                    <!-- 无选项：自由填写 + 继续 -->
+                    <form v-else class="space-y-2.5" @submit.prevent="submitAsk(false)">
+                      <textarea v-model="askValue" aria-labelledby="ask-title" rows="3" :disabled="isGenerating"
+                                placeholder="填写你的回答" class="w-full rounded-xl border border-gray-300 p-3 text-sm focus:outline-violet-500 bg-white/90"></textarea>
+                      <div class="flex items-center justify-end">
+                        <button type="submit" :disabled="!askValue.trim() || isGenerating || askNeedsSync" class="rounded-xl bg-violet-600 px-4 py-2 text-sm text-white disabled:opacity-40">
+                          {{ isGenerating ? '提交中…' : '继续' }}
+                        </button>
+                      </div>
+                    </form>
+                    <p v-if="askError" role="alert" class="mt-2 text-sm text-rose-700">{{ askError }}</p>
+                    <!-- 卡片底部手柄：点击向下收起 -->
+                    <div @click="closeAsk" title="点击收起" class="mt-3 pt-1 flex justify-center cursor-pointer group">
+                      <div class="w-10 h-1 rounded-full bg-gray-200 group-hover:bg-violet-300 transition-colors"></div>
+                    </div>
+                  </div>
+                </transition>
+                <!-- 卡片收起后：中线触发手柄，悬浮在输入区上缘，点击重新向上划出 -->
+                <div v-if="pendingAsk && !askDrawerOpen" class="absolute left-0 right-0 bottom-full z-20 flex justify-center">
+                  <button type="button" @click="showAsk"
+                          class="ask-handle-hint group flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-white hover:bg-violet-50 border border-gray-200/90 hover:border-violet-300 shadow-sm text-[11px] text-gray-500 hover:text-violet-700 transition-all">
+                    <svg class="ask-handle-chevron w-3.5 h-3.5 text-violet-500" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7"/></svg>
+                    <span class="font-medium">展开 Agent 提问</span>
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <!-- 输入区：占文档流底部，高度随内容变，消息区不会被挡住 -->
+            <!-- 输入区：灰色分割线在此；高度随内容变，消息区不会被挡住 -->
             <div class="flex-shrink-0 w-full border-t border-gray-200 bg-gray-50 px-4 pt-4 pb-6">
               <div class="max-w-4xl mx-auto relative flex flex-col items-center">
-                <button
-                  v-if="isGenerating"
-                  @click="stopGeneration"
-                  class="mb-4 flex items-center gap-2 bg-white border border-gray-200 shadow-md text-gray-600 hover:text-rose-600 hover:border-rose-200 px-5 py-2 rounded-full text-sm font-medium transition-all transform hover:scale-105"
-                >
-                  <icon-square class="w-4 h-4 fill-current" />
-                  停止生成
-                </button>
-
                 <div class="w-full flex items-end gap-3">
                   <div
                     class="group relative flex-shrink-0 mb-1"
@@ -942,20 +1360,31 @@
                     v-model="inputValue"
                     @input="handleInput"
                     @keydown="handleKeyDown"
+                    :disabled="Boolean(pendingAsk) || canContinueAsk || askNeedsSync"
                     placeholder="输入问题，让 Agent 为您分析、编程或检索数据... (Shift+Enter 换行)"
                     class="w-full max-h-[240px] min-h-[60px] py-4 pl-6 pr-14 bg-transparent resize-none outline-none text-[15px] leading-relaxed text-gray-800 placeholder:text-gray-400"
                     rows="1"
                   ></textarea>
                   <div class="absolute right-3 bottom-2.5">
+                    <!-- 发送 / 停止 二合一：生成中变为带转圈的停止按钮，点击停止后变回发送 -->
                     <button
-                      @click="handleSend"
-                      :disabled="!inputValue.trim() || isGenerating"
+                      type="button"
+                      @click="isGenerating ? stopGeneration() : handleSend()"
+                      :disabled="!isGenerating && (!inputValue.trim() || Boolean(pendingAsk) || canContinueAsk || askNeedsSync)"
+                      :title="isGenerating ? '停止生成' : '发送'"
+                      :aria-label="isGenerating ? '停止生成' : '发送'"
                       class="p-2.5 rounded-xl flex items-center justify-center transition-all duration-200"
-                      :class="inputValue.trim() && !isGenerating
-                        ? 'bg-violet-600 text-white shadow-md shadow-violet-200 hover:bg-violet-700 hover:scale-105'
-                        : 'bg-gray-100 text-gray-400 cursor-not-allowed'"
+                      :class="isGenerating
+                        ? 'bg-white border border-gray-300 text-gray-600 shadow-md hover:text-rose-600 hover:border-rose-300'
+                        : (inputValue.trim() && !pendingAsk && !canContinueAsk && !askNeedsSync
+                          ? 'bg-violet-600 text-white shadow-md shadow-violet-200 hover:bg-violet-700 hover:scale-105'
+                          : 'bg-gray-100 text-gray-400 cursor-not-allowed')"
                     >
-                      <icon-send class="w-5 h-5" />
+                      <span v-if="isGenerating" class="relative flex items-center justify-center w-5 h-5">
+                        <span class="absolute inset-0 rounded-full border-2 border-violet-500 border-t-transparent animate-spin"></span>
+                        <icon-square class="relative w-2.5 h-2.5 fill-current" />
+                      </span>
+                      <icon-send v-else class="w-5 h-5" />
                     </button>
                   </div>
                   </div>

@@ -124,10 +124,21 @@ def create_certificate_mapping_tool(pool):
             logger.warning("查询证书与职称对应失败（%s）", type(error).__name__)
             return {"status": "unavailable", "message": "证书对应查询暂不可用。", "matches": []}
 
-        return {
+        result = {
             "status": "found" if matches else "no_verified_match",
             "certificate": canonical,
             "matches": [{"scope": SOURCE_SCOPES[row["source_id"]], **row} for row in matches],
         }
+        # 渠道未知时的下一步引导。模型对工具结果中的指令服从率远高于技能长文；
+        # 若此轮在问本人申报条件而渠道未定，务必让模型走 ask_user 工具，
+        # 而不是在正文里列选项文字反问（实测模型的常见偏差）。
+        if matches and scope is None:
+            result["next_step_hint"] = (
+                "如果员工在问本人凭此证书申报职称的适用条件，而会话中尚未明确申报渠道，"
+                "下一步必须调用 ask_user 工具请员工选择渠道，等回答后再继续查询。"
+                "选项：集团内部、公司内部、北京人社、其他地方人社、还不确定"
+                "（其他地方人社的提交值为「地方人社」）。不要在正文里用文字列选项反问。"
+            )
+        return result
 
     return lookup_certificate_mapping

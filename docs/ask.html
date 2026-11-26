@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>证书与职称咨询 - Ask 问答卡片交互原型</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+
+        /* Ask 卡片向上划出与收起的平滑过渡动画 */
+        .ask-drawer {
+            transform-origin: bottom center;
+            transition: transform 0.38s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s ease, visibility 0.3s;
+        }
+
+        .ask-drawer.is-closed {
+            transform: translateY(24px) scale(0.96);
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        .ask-drawer.is-open {
+            transform: translateY(0) scale(1);
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+        }
+
+        /* 触发手柄呼吸灯微动效 */
+        @keyframes pulse-gentle {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-2px); }
+        }
+        .handle-hint:hover .handle-chevron {
+            animation: pulse-gentle 1.2s infinite ease-in-out;
+        }
+
+        /* 自定义滚动条 */
+        ::-webkit-scrollbar {
+            width: 5px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #e2e8f0;
+            border-radius: 9999px;
+        }
+    </style>
+</head>
+<body class="bg-[#f8f9fb] text-slate-800 h-screen w-screen overflow-hidden flex select-none">
+
+    
+
+    <!-- 右侧主内容区 -->
+    <main class="flex-1 flex flex-col h-full relative bg-[#f8f9fb]">
+        
+        <!-- 顶部导航栏 -->
+        <header class="h-14 bg-white/80 backdrop-blur-md border-b border-slate-200/70 px-6 flex items-center justify-between shrink-0 z-10">
+            <div class="flex items-center gap-2.5">
+                <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-200"></span>
+                <h1 class="text-sm font-semibold text-slate-800">证书与职称咨询</h1>
+            </div>
+            <div class="flex items-center gap-3">
+                <button onclick="toggleAskCard()" class="text-xs px-3 py-1.5 rounded-full bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200/60 transition cursor-pointer font-medium">
+                    切换 Ask 推荐卡片
+                </button>
+                <span class="px-3 py-1 rounded-full bg-purple-50/80 text-purple-600 text-xs font-medium border border-purple-100">admin</span>
+            </div>
+        </header>
+
+        <!-- 中间对话内容区域 -->
+        <div id="chatContainer" class="flex-1 overflow-y-auto px-4 md:px-10 py-6 flex flex-col">
+            <!-- 空状态提示 -->
+            <div id="emptyState" class="m-auto text-center text-slate-400 text-sm select-none">
+                输入问题开始对话
+            </div>
+
+            <!-- 动态消息列表 -->
+            <div id="messageList" class="max-w-3xl w-full mx-auto flex flex-col gap-5 hidden pb-4"></div>
+        </div>
+
+        <!-- 底部区域：包含 Ask 向上划出卡片 + 中线触发手柄 + 输入框 -->
+        <div class="w-full relative px-4 pb-3 pt-2 bg-gradient-to-t from-[#f8f9fb] via-[#f8f9fb] to-transparent shrink-0">
+            <div class="max-w-3xl mx-auto relative">
+
+                <!-- ========================================================= -->
+                <!-- 核心组件：Ask 模型问答推荐卡片 (从输入框上方中线向上划出)      -->
+                <!-- ========================================================= -->
+                <div id="askCard" class="ask-drawer is-open mb-3 rounded-2xl bg-gradient-to-b from-[#f5f3ff]/95 via-white/95 to-white/95 backdrop-blur-xl border border-purple-200/70 shadow-[0_12px_36px_-8px_rgba(99,51,234,0.14),0_4px_12px_-2px_rgba(15,23,42,0.05)] p-4 sm:p-5 relative">
+                    
+                    <!-- 卡片头部：AI 图标 + 标题 + 收起按钮 -->
+                    <div class="flex items-center justify-between mb-3.5">
+                        <div class="flex items-center gap-2">
+                            <!-- 渐变 AI 星芒图标 -->
+                            <div class="w-7 h-7 rounded-lg bg-gradient-to-tr from-[#6333ea] to-[#34d399] p-[1px] shadow-sm">
+                                <div class="w-full h-full bg-white rounded-[7px] flex items-center justify-center">
+                                    <svg class="w-4 h-4 text-[#6333ea]" viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M12 2L14.4 9.6L22 12L14.4 14.4L12 22L9.6 14.4L2 12L9.6 9.6L12 2Z"/>
+                                    </svg>
+                                </div>
+                            </div>
+                            <span class="text-sm font-semibold text-slate-800 tracking-tight">你可以这样问我</span>
+                            <span class="hidden sm:inline-block text-[11px] px-2 py-0.5 rounded-full bg-purple-100/70 text-purple-700 font-medium">模型智能推荐</span>
+                        </div>
+
+                        <div class="flex items-center gap-1.5">
+                            <!-- 换一批问题按钮 -->
+                            <button onclick="refreshQuestions()" title="换一批推荐问题" class="text-xs text-slate-400 hover:text-purple-600 px-2 py-1 rounded-lg hover:bg-purple-50/70 transition flex items-center gap-1 cursor-pointer">
+                                <svg id="refreshIcon" class="w-3.5 h-3.5 transition-transform duration-300" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                                <span>换一批</span>
+                            </button>
+                            <!-- 收起按钮 -->
+                            <button onclick="closeAskCard()" title="向下收起卡片" class="w-7 h-7 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100/80 flex items-center justify-center transition cursor-pointer">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 2x2 推荐问题网格 -->
+                    <div id="questionGrid" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <!-- 由 JS 动态渲染问题卡片 -->
+                    </div>
+
+                    <!-- 卡片底部指示手柄 (支持点击或向下拖拽收起) -->
+                    <div id="cardBottomHandle" onclick="closeAskCard()" title="点击收起" class="mt-3 pt-1 flex justify-center cursor-pointer group">
+                        <div class="w-10 h-1 rounded-full bg-slate-200 group-hover:bg-purple-300 transition-colors"></div>
+                    </div>
+                </div>
+
+                <!-- ========================================================= -->
+                <!-- 中线处向上划出触发手柄 (当卡片收起或作为中线锚点时交互)        -->
+                <!-- ========================================================= -->
+                <div class="flex justify-center -mt-1 mb-1.5 relative z-20">
+                    <button id="centerPullTrigger" onclick="toggleAskCard()" 
+                        class="handle-hint group flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-white hover:bg-purple-50 border border-slate-200/90 hover:border-purple-300 shadow-sm text-[11px] text-slate-500 hover:text-purple-700 transition-all cursor-pointer">
+                        <svg id="triggerChevron" class="handle-chevron w-3.5 h-3.5 text-purple-500 transition-transform duration-300 rotate-180" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7"/>
+                        </svg>
+                        <span id="triggerText" class="font-medium">收起推荐问法</span>
+                    </button>
+                </div>
+
+                <!-- ========================================================= -->
+                <!-- 底部输入框区域 (高度还原原图风格)                            -->
+                <!-- ========================================================= -->
+                <div class="flex items-center gap-3">
+                    <!-- 左侧 0% 上下文圆环 -->
+                    <div class="w-11 h-11 rounded-full bg-white border border-slate-200/90 shadow-sm flex flex-col items-center justify-center shrink-0">
+                        <span id="contextPercent" class="text-[11px] font-semibold text-slate-600 leading-none">0%</span>
+                        <span class="text-[9px] text-slate-400 mt-0.5 scale-90">上下文</span>
+                    </div>
+
+                    <!-- 主输入框 -->
+                    <div class="flex-1 bg-white rounded-2xl border border-slate-200/90 focus-within:border-purple-400 focus-within:ring-4 focus-within:ring-purple-100/60 shadow-sm px-4 py-2.5 flex items-center gap-2 transition-all">
+                        <textarea id="chatInput" rows="1" placeholder="输入问题，让 Agent 为您分析、编程或检索数据... (Shift+Enter 换行)"
+                            class="w-full resize-none border-0 bg-transparent text-sm text-slate-700 placeholder-slate-400 focus:outline-none leading-6 max-h-28"></textarea>
+                        
+                        <button onclick="sendMessage()" class="w-8 h-8 rounded-xl bg-slate-100 hover:bg-[#6333ea] text-slate-400 hover:text-white flex items-center justify-center transition shrink-0 cursor-pointer">
+                            <svg class="w-4 h-4 transform rotate-45 -translate-x-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 底部免责声明 -->
+                <div class="text-center mt-2 flex items-center justify-center gap-1 text-[11px] text-slate-400">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    <span>Agent 可能会犯错。请核实关键信息。</span>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // 预设多组与“证书与职称咨询”相关的模型推荐问法
+        const questionSets = [
+            [
+                {
+                    text: "如何申报高级职称？需要哪些材料？",
+                    iconBg: "bg-purple-100/80 text-purple-600",
+                    svg: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>`
+                },
+                {
+                    text: "证书遗失了该怎么补办？流程是怎样的？",
+                    iconBg: "bg-indigo-100/80 text-indigo-600",
+                    svg: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"/></svg>`
+                },
+                {
+                    text: "我目前的条件能直接评中级职称吗？",
+                    iconBg: "bg-emerald-100/80 text-emerald-600",
+                    svg: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3"/></svg>`
+                },
+                {
+                    text: "证书与职称的关系是什么？怎么转换？",
+                    iconBg: "bg-teal-100/80 text-teal-600",
+                    svg: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`
+                }
+            ],
+            [
+                {
+                    text: "一级建造师证书可以直接对应中级职称吗？",
+                    iconBg: "bg-purple-100/80 text-purple-600",
+                    svg: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`
+                },
+                {
+                    text: "评审高级工程师对论文和专利有什么硬性要求？",
+                    iconBg: "bg-blue-100/80 text-blue-600",
+                    svg: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>`
+                },
+                {
+                    text: "跨省跳槽后，原省份的职称证书需要重新确认吗？",
+                    iconBg: "bg-emerald-100/80 text-emerald-600",
+                    svg: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>`
+                },
+                {
+                    text: "继续教育学时不够，会影响今年的职称申报吗？",
+                    iconBg: "bg-amber-100/80 text-amber-600",
+                    svg: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`
+                }
+            ]
+        ];
+
+        let currentSetIndex = 0;
+        let isCardOpen = true;
+        let messageCount = 0;
+
+        const askCard = document.getElementById('askCard');
+        const questionGrid = document.getElementById('questionGrid');
+        const triggerChevron = document.getElementById('triggerChevron');
+        const triggerText = document.getElementById('triggerText');
+        const chatInput = document.getElementById('chatInput');
+        const emptyState = document.getElementById('emptyState');
+        const messageList = document.getElementById('messageList');
+        const contextPercent = document.getElementById('contextPercent');
+
+        // 渲染推荐问题卡片
+        function renderQuestions() {
+            const list = questionSets[currentSetIndex];
+            questionGrid.innerHTML = list.map((item) => `
+                <button onclick="selectQuestion('${item.text}')" 
+                    class="group flex items-center gap-3 p-3 rounded-xl bg-white/90 hover:bg-purple-50/70 border border-slate-200/80 hover:border-purple-300 shadow-[0_1px_2px_rgba(0,0,0,0.02)] hover:shadow-sm transition-all text-left cursor-pointer active:scale-[0.99]">
+                    <div class="w-8 h-8 rounded-lg ${item.iconBg} flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+                        ${item.svg}
+                    </div>
+                    <span class="text-xs sm:text-[13px] font-medium text-slate-700 group-hover:text-purple-900 leading-snug line-clamp-2 flex-1">
+                        ${item.text}
+                    </span>
+                    <svg class="w-3.5 h-3.5 text-slate-300 group-hover:text-purple-500 group-hover:translate-x-0.5 transition-all shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/>
+                    </svg>
+                </button>
+            `).join('');
+        }
+
+        // 换一批推荐问题
+        function refreshQuestions() {
+            const icon = document.getElementById('refreshIcon');
+            icon.style.transform = 'rotate(360deg)';
+            setTimeout(() => { icon.style.transform = 'rotate(0deg)'; }, 320);
+            currentSetIndex = (currentSetIndex + 1) % questionSets.length;
+            renderQuestions();
+        }
+
+        // 打开 Ask 卡片（从下方中线向上划出）
+        function openAskCard() {
+            isCardOpen = true;
+            askCard.classList.remove('is-closed');
+            askCard.classList.add('is-open');
+            triggerChevron.classList.add('rotate-180');
+            triggerText.textContent = '收起推荐问法';
+        }
+
+        // 收起 Ask 卡片
+        function closeAskCard() {
+            isCardOpen = false;
+            askCard.classList.remove('is-open');
+            askCard.classList.add('is-closed');
+            triggerChevron.classList.remove('rotate-180');
+            triggerText.textContent = '向上划出推荐问法';
+        }
+
+        // 切换 Ask 卡片状态
+        function toggleAskCard() {
+            if (isCardOpen) {
+                closeAskCard();
+            } else {
+                openAskCard();
+            }
+        }
+
+        // 点击推荐问题：自动填入并发送
+        function selectQuestion(text) {
+            chatInput.value = text;
+            sendMessage();
+        }
+
+        // 发送消息模拟对话
+        function sendMessage() {
+            const text = chatInput.value.trim();
+            if (!text) return;
+
+            emptyState.classList.add('hidden');
+            messageList.classList.remove('hidden');
+
+            // 添加用户消息气泡
+            const userBubble = document.createElement('div');
+            userBubble.className = 'flex justify-end';
+            userBubble.innerHTML = `
+                <div class="max-w-[80%] bg-[#6333ea] text-white text-sm px-4 py-2.5 rounded-2xl rounded-tr-sm shadow-sm leading-relaxed">
+                    ${escapeHtml(text)}
+                </div>
+            `;
+            messageList.appendChild(userBubble);
+
+            chatInput.value = '';
+            // 发送后自动收起推荐卡片，留出对话空间
+            closeAskCard();
+
+            messageCount++;
+            contextPercent.textContent = Math.min(messageCount * 8, 100) + '%';
+
+            // 模拟 AI 回复
+            setTimeout(() => {
+                const aiBubble = document.createElement('div');
+                aiBubble.className = 'flex items-start gap-3';
+                aiBubble.innerHTML = `
+                    <div class="w-8 h-8 rounded-xl bg-gradient-to-tr from-[#6333ea] to-[#34d399] flex items-center justify-center text-white text-xs font-bold shrink-0 shadow-sm">AI</div>
+                    <div class="max-w-[85%] bg-white border border-slate-200/80 text-slate-700 text-sm px-4 py-3 rounded-2xl rounded-tl-sm shadow-sm leading-relaxed">
+                        <p class="font-medium text-slate-800 mb-1">关于“${escapeHtml(text)}”的解答：</p>
+                        <p class="text-slate-600 text-[13px]">根据最新职称评审政策，您需要准备身份证、学历学位证书、现职称证书、近几年业绩成果材料及继续教育学时证明。您可以随时点击下方中线手柄再次唤出 <b>Ask 推荐卡片</b> 继续追问。</p>
+                    </div>
+                `;
+                messageList.appendChild(aiBubble);
+                const container = document.getElementById('chatContainer');
+                container.scrollTop = container.scrollHeight;
+            }, 400);
+        }
+
+        // 重置会话
+        function resetChat() {
+            messageList.innerHTML = '';
+            messageList.classList.add('hidden');
+            emptyState.classList.remove('hidden');
+            messageCount = 0;
+            contextPercent.textContent = '0%';
+            openAskCard();
+        }
+
+        // 支持中线手柄向上滑动手势（触摸屏/鼠标拖拽）
+        let startY = 0;
+        const pullTrigger = document.getElementById('centerPullTrigger');
+        pullTrigger.addEventListener('touchstart', (e) => {
+            startY = e.touches[0].clientY;
+        }, { passive: true });
+
+        pullTrigger.addEventListener('touchend', (e) => {
+            const endY = e.changedTouches[0].clientY;
+            if (startY - endY > 15) {
+                openAskCard();
+            }
+        });
+
+        // 回车发送
+        chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        function escapeHtml(str) {
+            return str.replace(/[&<>"']/g, (m) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[m]));
+        }
+
+        // 初始化渲染
+        renderQuestions();
+    </script>
+</body>
+</html>

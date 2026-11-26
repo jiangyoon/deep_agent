@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessageChunk
 
 from career_agent import config
 from career_agent.core.messages import content_to_text
-from career_agent.web.chat_history import tool_call_data, tool_result_data
+from career_agent.web.chat_history import pending_ask, tool_call_data, tool_result_data
 from career_agent.web.usage_tracker import StreamUsageTracker
 
 
@@ -54,24 +54,25 @@ def usage_data(usage) -> dict | None:
     return result
 
 
-def stream_answer(agent, question: str, run_config=None, context=None):
-    """运行一次独立问答，发送思考、工具步骤、用量和回答正文。"""
+def stream_answer(agent, graph_input, run_config=None, context=None):
+    """开始或恢复问答，将 LangGraph 中断转换为网页可处理的事件。"""
     text_emitted = False
+    ask = None
     usage_tracker = StreamUsageTracker()
 
     try:
         stream_arguments = {
             "stream_mode": ["messages", "updates"],
+            "durability": "sync",
         }
         if run_config is not None:
             stream_arguments["config"] = run_config
         if context is not None:
             stream_arguments["context"] = context
 
-        chunks = agent.stream(
-            {"messages": [{"role": "user", "content": question}]},
-            **stream_arguments,
-        )
+        if isinstance(graph_input, str):
+            graph_input = {"messages": [{"role": "user", "content": graph_input}]}
+        chunks = agent.stream(graph_input, **stream_arguments)
 
         for mode, payload in chunks:
             if mode == "messages":
@@ -99,6 +100,8 @@ def stream_answer(agent, question: str, run_config=None, context=None):
                     yield sse_event("answer_delta", {"text": text})
 
             elif mode == "updates":
+                if "__interrupt__" in payload:
+                    ask = pending_ask(payload["__interrupt__"])
                 for node_name, data in payload.items():
                     if data is None:
                         continue
@@ -128,6 +131,9 @@ def stream_answer(agent, question: str, run_config=None, context=None):
                         for message in message_list(data):
                             yield sse_event("tool_result", tool_result_data(message))
 
+        if ask is not None:
+            yield sse_event("ask_user", ask)
+            return
         if not text_emitted:
             raise RuntimeError("Agent 没有返回回答正文")
 
