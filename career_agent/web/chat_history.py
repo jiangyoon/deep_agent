@@ -1,7 +1,9 @@
 """将会话检查点还原成与网页直播一致的执行步骤。"""
 
+import json
 from itertools import groupby
 
+from career_agent.agent.ask_user import ask_tool_reply, turn_has_ask_answer
 from career_agent.core.messages import content_to_text
 
 
@@ -9,14 +11,59 @@ def tool_call_data(call):
     return {"id": call.get("id", ""), "name": call.get("name", ""), "args": call.get("args", {})}
 
 
+def _reward_blue_names(text):
+    """从奖励工具的完整结果里提取蓝色字体证书名（blue_display_names）。
+
+    展示用的 result 会截断，长结果无法在前端 JSON.parse；这里对原始
+    完整内容解析并去重，随 tool_result 事件独立下发，前端不碰 JSON。
+    """
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    names = []
+    rows = payload.get("results", []) if isinstance(payload, dict) else []
+    for row in rows:
+        for name in row.get("blue_display_names") or []:
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
 def tool_result_data(message):
     text = content_to_text(message.content)
-    return {
+    data = {
         "id": getattr(message, "tool_call_id", ""),
         "name": getattr(message, "name", ""),
         "status": getattr(message, "status", "success"),
         "result": text if len(text) <= 2000 else text[:2000] + "…",
     }
+    if getattr(message, "name", "") == "lookup_certificate_reward":
+        data["blueNames"] = _reward_blue_names(text)
+    reply = ask_tool_reply(message)
+    if reply:
+        data["askReply"] = reply
+    return data
+
+
+def pending_ask(interrupts):
+    """将检查点中的 Ask 中断整理成网页使用的待答问题。"""
+    for item in interrupts:
+        value = item.value
+        if isinstance(value, dict) and value.get("type") == "ask_user":
+            return {
+                "id": item.id,
+                "tool_call_id": value.get("tool_call_id"),
+                "question": value["question"],
+                "options": value.get("options") or [],
+            }
+    return None
+
+
+def can_continue_ask(state):
+    """答复已入检查点、后续运行未完成时可继续原轮。"""
+    return bool(state and state.next and not state.interrupts
+                and turn_has_ask_answer(state.values.get("messages", [])))
 
 
 def visible_messages(messages):

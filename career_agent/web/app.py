@@ -12,9 +12,11 @@ if __name__ == "__main__" and __package__ in {None, ""}:
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from career_agent import config
+from career_agent.agent.ask_user import AskQuestion, AskReply, ask_user
 from career_agent.agent.builder import build_agent
 from career_agent.core.app_db import open_app_pool
 from career_agent.core.llm_model import create_llm
@@ -31,8 +33,9 @@ from career_agent.core.session_store import (
 )
 from career_agent.core.user_store import UserStore
 from career_agent.knowledge.tools import create_kb1_tools
+from career_agent.knowledge.notice_attachments import create_attachment_reader
 from career_agent.web.agent_stream import stream_answer
-from career_agent.web.chat_history import browser_message_count, browser_messages
+from career_agent.web.chat_history import browser_message_count, browser_messages, can_continue_ask, pending_ask
 from career_agent.web.auth import current_user, require_same_origin, router as auth_router
 
 
@@ -48,6 +51,7 @@ async def lifespan(application: FastAPI):
     with open_app_pool() as pool:
         application.state.user_store = UserStore(pool)
         application.state.kb1_tools = create_kb1_tools(pool)
+        application.state.attachment_reader = create_attachment_reader(pool)
         # 同步执行链串行运行，避免生成与删除同一会话相互覆盖。
         application.state.session_run_lock = threading.Lock()
         application.state.memory_store = create_memory_store(pool)
@@ -80,6 +84,11 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=10000)
 
 
+class AskResumeRequest(BaseModel):
+    interrupt_id: str = Field(min_length=1)
+    reply: AskReply
+
+
 class SessionResponse(BaseModel):
     """浏览器使用的会话概要。"""
 
@@ -108,7 +117,7 @@ def get_session_agent(request: Request):
             llm = create_llm()
             agent = build_agent(
                 llm,
-                tools=request.app.state.kb1_tools,
+                tools=[*request.app.state.kb1_tools, ask_user],
                 use_skills=config.USE_SKILLS,
                 use_memory=config.USE_MEMORY,
                 store=request.app.state.memory_store,
@@ -295,6 +304,31 @@ def chat_messages(request: Request, session_id: str):
     return get_session_messages(get_session_agent(request), session_id)
 
 
+# 可下载口径（全部在 create_attachment_reader 的库侧查询里兑现，本路由
+# 不重复判断）：附件自身现行有效且来源状态在展示白名单内（review_dataset /
+# 模板 / 目录元数据）、download_policy 显式放行、父来源满足 REVIEWED_FILE
+# （已审核 + 现行有效）。被「完全排除」的来源（专家名单等敏感文件）自然
+# 拿不到下载；策略里的登录要求由路由的 current_user 兑现。
+@app.get("/api/attachments/{attachment_id}/download")
+def download_attachment(request: Request, attachment_id: str,
+                        user: dict = Depends(current_user)) -> FileResponse:
+    """登录员工下载附件原件（评审表/承诺书等模板与已索引正文）。
+
+    下载策略 requires_authenticated_internal_access_and_release_review 的
+    两半分别在路由（登录）与库侧（发布审核口径）兑现。attachment_id 是
+    kb1_attachments 的主键，original_path 取自库内受控数据而非用户输入，
+    不存在路径注入面；机器上文件缺失时按 404 处理。
+    """
+    found = request.app.state.attachment_reader(attachment_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="没有这个附件或不可下载")
+    display_name, original_path = found
+    path = Path(original_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="附件原件不在服务器上")
+    return FileResponse(path, filename=display_name)
+
+
 @app.post("/api/sessions", response_model=SessionResponse)
 def create_session(request: Request, user: dict = Depends(current_user)) -> SessionResponse:
     """创建会话时立即记录归属；尚未提问的空会话也会出现在列表中。"""
@@ -316,13 +350,37 @@ def get_sessions(request: Request, user: dict = Depends(current_user)) -> list[S
 
 
 @app.get("/api/sessions/{session_id}")
-def get_session(request: Request, session_id: str, user: dict = Depends(current_user)) -> dict:
+def get_session(
+    request: Request, session_id: str, settled: bool = False, user: dict = Depends(current_user)
+) -> dict:
+    """断线后可请求锁释放后的会话快照，避免读到提交中的状态。"""
     require_owned_chat(request, user, session_id)
-    messages = chat_messages(request, session_id)
+    if settled:
+        lock = request.app.state.session_run_lock
+        if not lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="本轮仍在处理，请稍后重新加载")
+        try:
+            require_owned_chat(request, user, session_id)
+            return session_snapshot(request, session_id)
+        finally:
+            lock.release()
+    return session_snapshot(request, session_id)
+
+
+def session_snapshot(request: Request, session_id: str) -> dict:
+    state = None
+    if session_exists(request.app.state.session_saver, session_id):
+        state = get_session_agent(request).get_state(make_config(session_id))
+    messages = state.values.get("messages", []) if state is not None else []
+    can_continue = can_continue_ask(state)
+    streaming = getattr(request.app.state, "streaming_session_id", None) == session_id
     return {
         "id": session_id,
         "messages": browser_messages(messages),
         "context_usage": session_context_usage(messages),
+        "pending_ask": pending_ask(state.interrupts) if state is not None else None,
+        "can_continue_ask": can_continue and not streaming,
+        "ask_in_progress": can_continue and streaming,
     }
 
 
@@ -349,19 +407,62 @@ def session_chat_stream(
     question = chat_request.question.strip()
     if question == "":
         raise HTTPException(status_code=422, detail="问题不能为空")
+    agent = require_session_agent(request)
+    run_config = make_config(session_id)
+    state = agent.get_state(run_config)
+    if pending_ask(state.interrupts) is not None or can_continue_ask(state):
+        raise HTTPException(status_code=409, detail="当前会话有一轮问答待继续")
+    return chat_stream_response(request, agent, question, run_config, user["id"])
+
+
+@app.post("/api/sessions/{session_id}/resume")
+def resume_session(
+    request: Request,
+    session_id: str,
+    answer: AskResumeRequest | None = None,
+    user: dict = Depends(owned_session_user),
+    operation=Depends(session_operation, scope="request"),
+) -> StreamingResponse:
+    """提交当前待答问题，或继续已接收答案但尚未结束的问答。"""
+    require_owned_chat(request, user, session_id)
+    agent = require_session_agent(request)
+    run_config = make_config(session_id)
+    state = agent.get_state(run_config)
+    if answer is None:
+        if not can_continue_ask(state):
+            raise HTTPException(status_code=409, detail="这一轮已经处理或没有可继续的答复")
+        graph_input = None
+    else:
+        ask = pending_ask(state.interrupts)
+        if not ask or ask["id"] != answer.interrupt_id:
+            raise HTTPException(status_code=409, detail="该问题已处理或已变化")
+        try:
+            question = AskQuestion(question=ask["question"], options=ask["options"])
+            reply = question.validate_reply(answer.reply.model_dump(exclude_none=True))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        graph_input = Command(resume={ask["id"]: reply.model_dump(exclude_none=True)})
+    return chat_stream_response(request, agent, graph_input, run_config, user["id"])
+
+
+def require_session_agent(request):
     try:
-        agent = get_session_agent(request)
+        return get_session_agent(request)
     except Exception:
         logger.exception("创建持久化 Web Agent 失败")
         raise HTTPException(status_code=503, detail="模型初始化失败，请检查服务端日志和模型配置") from None
 
+
+def chat_stream_response(request, agent, graph_input, run_config, user_id):
+
     def owned_stream():
-        if config.USE_MEMORY:
-            seed_memory_if_missing(request.app.state.memory_store, user_id=user["id"])
-        yield from stream_answer(
-            agent, question, run_config=make_config(session_id),
-            context={"user_id": user["id"]},
-        )
+        request.app.state.streaming_session_id = run_config["configurable"]["thread_id"]
+        try:
+            if config.USE_MEMORY:
+                seed_memory_if_missing(request.app.state.memory_store, user_id=user_id)
+            yield from stream_answer(agent, graph_input, run_config, context={"user_id": user_id})
+        finally:
+            request.app.state.streaming_session_id = None
 
     return StreamingResponse(
         owned_stream(), media_type="text/event-stream",
