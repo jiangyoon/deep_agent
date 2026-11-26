@@ -15,7 +15,7 @@ from langchain_core.tools import tool
 from career_agent.knowledge.pg_lookup import (
     REVIEWED_FILE, Keyword, SourceId, Year, handle_db_errors, read_snapshot,
 )
-from career_agent.knowledge.policy_sources import Scope, resolve_regions, scope_filters
+from career_agent.knowledge.policy_sources import Scope, region_required, resolve_regions, scope_filters
 
 
 # 全部筛选参数均可空（NULL 即不过滤）；channel/route 由 scope_filters(scope)
@@ -53,7 +53,7 @@ def create_application_schedule_tool(pool):
         # 渠道是「地方人社」却未给地区：引导模型先向员工确认省市再查，
         # 避免把全部地方文件混在一起返回错误口径的节点。
         if scope == "地方人社" and not region:
-            return {"status": "needs_region", "message": "请确认地方人社申报的省市。", "results": []}
+            return region_required()
         with read_snapshot(pool) as db:
             params = {**scope_filters(scope), "regions": resolve_regions(db, scope, region),
                       "year": year, "event": event_type, "source_id": source_id}

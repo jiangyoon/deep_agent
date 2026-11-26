@@ -20,7 +20,7 @@ from pydantic import Field
 from pymilvus.exceptions import MilvusException
 
 from career_agent.knowledge.policy_retrieval import retrieve_candidates
-from career_agent.knowledge.policy_sources import Scope, find_source_ids, load_ranked_sections
+from career_agent.knowledge.policy_sources import Scope, find_source_ids, load_ranked_sections, region_required
 
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ def create_policy_search_tool(pool):
         # 地方人社必须先确认省市：不同地区文件口径完全不同，混合返回
         # 会让模型把外省条件当成员工所在地的条件。
         if scope == "地方人社" and not region:
-            return {"status": "needs_region", "message": "请确认地方人社申报的省市。", "results": []}
+            return region_required()
 
         filters = {
             "scope": scope,

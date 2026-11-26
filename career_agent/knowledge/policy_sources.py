@@ -15,6 +15,7 @@
 import re
 from typing import Literal
 
+from career_agent.agent.ask_user import ToolClarification
 from career_agent.knowledge.pg_lookup import REVIEWED_FILE, read_snapshot
 
 
@@ -26,6 +27,19 @@ BEIJING = "北京市"
 REGION_SUFFIX = re.compile(r"(特别行政区|自治区|自治州|省|市|区|县)$")
 # 奖励目录标题中的版次年份（「2025年版」），决定目录适用的默认年度。
 EDITION_YEAR = re.compile(r"([12][0-9]{3})年版")
+
+
+def region_required():
+    """给查询调用方一个明确的地区确认入口。"""
+    return {
+        "status": "needs_region",
+        "message": "地方人社查询需要申报省市。已有地区时补上 region 重查，否则调用 ask_user。",
+        "results": [],
+        "clarification": ToolClarification(
+            tool="ask_user", field="region", question="你准备在哪个省市申报？",
+        ).model_dump(exclude_none=True),
+    }
+
 
 # 来源白名单主查询。三个关键点：
 #   attachment_years CTE——「年度通知挂载的知识性附件」自身 applicable_year
