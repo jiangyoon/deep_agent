@@ -20,3 +20,8 @@ data/material_review/
 
 # 后续 Web 层生成的运行日志
 *.log
+
+# 本地运行时副产物与临时探针（不入库）
+.agents/
+.tmp/
+career_agent/mcptest.py
